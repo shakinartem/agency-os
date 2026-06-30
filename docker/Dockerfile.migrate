@@ -1,0 +1,15 @@
+FROM python:3.12-slim
+
+WORKDIR /app/packages/database
+
+COPY packages/database/pyproject.toml packages/database/
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -e packages/database/
+
+COPY packages/ packages/
+
+ENV DATABASE_URL=postgresql+psycopg2://agency:agency_secret@postgres:5432/agency_os
+ENV PYTHONPATH=/app/packages
+ENV ALEMBIC_CONFIG=/app/packages/database/alembic.ini
+
+CMD ["alembic", "-c", "/app/packages/database/alembic.ini", "upgrade", "head"]

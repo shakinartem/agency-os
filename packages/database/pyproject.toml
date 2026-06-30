@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=42"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agency-os-database"
+version = "0.1.0"
+description = "Database models, migrations and seeds for Agency OS"
+requires-python = ">=3.12"
+dependencies = [
+    "sqlalchemy[asyncio]>=2.0.30",
+    "alembic>=1.13.0",
+    "pydantic>=2.7.0",
+    "psycopg2-binary>=2.9.0",
+    "python-dotenv>=1.0.0",
+]
