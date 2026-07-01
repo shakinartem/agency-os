@@ -1,15 +1,16 @@
 FROM python:3.12-slim
 
-WORKDIR /app/packages/database
+WORKDIR /app
 
-COPY packages/database/pyproject.toml packages/database/
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -e packages/database/
+RUN pip install --no-cache-dir alembic sqlalchemy psycopg2-binary asyncpg python-dotenv "sqlalchemy[asyncio]" pydantic-settings
 
-COPY packages/ packages/
+COPY .env .env
+COPY packages/ ./packages/
+COPY integrations/ ./integrations/
 
 ENV DATABASE_URL=postgresql+psycopg2://agency:agency_secret@postgres:5432/agency_os
-ENV PYTHONPATH=/app/packages
-ENV ALEMBIC_CONFIG=/app/packages/database/alembic.ini
+ENV PYTHONPATH=/app/packages:/app/integrations
 
-CMD ["alembic", "-c", "/app/packages/database/alembic.ini", "upgrade", "head"]
+WORKDIR /app/packages/database
+
+CMD ["alembic", "upgrade", "head"]

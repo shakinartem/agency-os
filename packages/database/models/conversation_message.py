@@ -2,12 +2,13 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 from ..enums import MessageRole
+from ._types import enum_type
 
 
 class ConversationMessage(Base):
@@ -22,7 +23,7 @@ class ConversationMessage(Base):
         nullable=False, index=True,
     )
     role: Mapped[MessageRole] = mapped_column(
-        String(20), default=MessageRole.user, nullable=False,
+        enum_type(MessageRole), default=MessageRole.user, nullable=False,
     )
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(

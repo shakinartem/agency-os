@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..base import Base
 from ..enums import IntegrationHealth
 from ..mixins import TimestampMixin
+from ._types import enum_type
 
 
 class IntegrationConfig(Base, TimestampMixin):
@@ -25,7 +26,7 @@ class IntegrationConfig(Base, TimestampMixin):
     base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)  # encrypted in production
     health_status: Mapped[IntegrationHealth] = mapped_column(
-        String(20), default=IntegrationHealth.healthy, nullable=False,
+        enum_type(IntegrationHealth), default=IntegrationHealth.healthy, nullable=False,
     )
     last_sync_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

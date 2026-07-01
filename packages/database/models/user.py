@@ -1,15 +1,15 @@
 """User model."""
 
 import uuid
-from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy import Boolean, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 from ..enums import UserRole
 from ..mixins import TimestampMixin
+from ._types import enum_type
 
 
 class User(Base, TimestampMixin):
@@ -21,7 +21,7 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[UserRole] = mapped_column(
-        String(20), default=UserRole.viewer, nullable=False,
+        enum_type(UserRole), default=UserRole.viewer, nullable=False,
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)

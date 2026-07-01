@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..base import Base
 from ..enums import Platform, PublicationStatus
 from ..mixins import TimestampMixin
+from ._types import enum_type
 
 
 class Publication(Base, TimestampMixin):
@@ -24,11 +25,11 @@ class Publication(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("content_items.id", ondelete="SET NULL"), nullable=True,
     )
     platform: Mapped[Platform] = mapped_column(
-        String(20), nullable=False,
+        enum_type(Platform), nullable=False,
     )
     scheduled_at: Mapped[str | None] = mapped_column(String(32), nullable=True)
     status: Mapped[PublicationStatus] = mapped_column(
-        String(20), default=PublicationStatus.scheduled, nullable=False, index=True,
+        enum_type(PublicationStatus), default=PublicationStatus.scheduled, nullable=False, index=True,
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 

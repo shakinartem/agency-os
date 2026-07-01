@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
 from ..enums import IntegrationAction, IntegrationActionStatus
+from ._types import enum_type
 
 
 class IntegrationLog(Base):
@@ -22,10 +23,10 @@ class IntegrationLog(Base):
         nullable=False, index=True,
     )
     action: Mapped[IntegrationAction] = mapped_column(
-        String(20), nullable=False,
+        enum_type(IntegrationAction), nullable=False,
     )
     status: Mapped[IntegrationActionStatus] = mapped_column(
-        String(20), nullable=False,
+        enum_type(IntegrationActionStatus), nullable=False,
     )
     payload: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

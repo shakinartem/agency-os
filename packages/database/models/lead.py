@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..base import Base
 from ..enums import LeadSource, LeadStatus
 from ..mixins import TimestampMixin
+from ._types import enum_type
 
 
 class Lead(Base, TimestampMixin):
@@ -25,10 +26,10 @@ class Lead(Base, TimestampMixin):
     telegram: Mapped[str | None] = mapped_column(String(255), nullable=True)
     whatsapp: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status: Mapped[LeadStatus] = mapped_column(
-        String(20), default=LeadStatus.new, nullable=False, index=True,
+        enum_type(LeadStatus), default=LeadStatus.new, nullable=False, index=True,
     )
     source: Mapped[LeadSource] = mapped_column(
-        String(20), default=LeadSource.manual, nullable=False,
+        enum_type(LeadSource), default=LeadSource.manual, nullable=False,
     )
     manager_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,

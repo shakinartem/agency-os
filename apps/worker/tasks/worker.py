@@ -1,8 +1,13 @@
-"""Agency OS — Background task worker entry point."""
+"""Agency OS background worker entry point."""
+
+import os
 
 from celery import Celery
 
-app = Celery("agency_os_worker", broker="redis://redis:6379/0")
+broker_url = os.getenv("REDIS_URL", "redis://localhost:6380/0")
+
+app = Celery("agency_os_worker", broker=broker_url)
+app.conf.broker_connection_retry_on_startup = True
 
 
 @app.task

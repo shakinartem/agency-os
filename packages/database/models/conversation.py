@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from ..base import Base
 from ..enums import ConversationSource, ConversationStatus
 from ..mixins import TimestampMixin
+from ._types import enum_type
 
 
 class Conversation(Base, TimestampMixin):
@@ -24,10 +25,10 @@ class Conversation(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("leads.id", ondelete="CASCADE"), nullable=False,
     )
     source: Mapped[ConversationSource] = mapped_column(
-        String(20), default=ConversationSource.telegram, nullable=False,
+        enum_type(ConversationSource), default=ConversationSource.telegram, nullable=False,
     )
     status: Mapped[ConversationStatus] = mapped_column(
-        String(20), default=ConversationStatus.active, nullable=False, index=True,
+        enum_type(ConversationStatus), default=ConversationStatus.active, nullable=False, index=True,
     )
     last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
