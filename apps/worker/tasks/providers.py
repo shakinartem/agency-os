@@ -34,11 +34,13 @@ MEDIA_QUALITY_THRESHOLD = float(os.getenv("MEDIA_QUALITY_THRESHOLD", "0.86"))
 MAX_IMAGE_ATTEMPTS = int(os.getenv("MAX_IMAGE_ATTEMPTS", "2"))
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL")
+S3_PUBLIC_ENDPOINT_URL = os.getenv("S3_PUBLIC_ENDPOINT_URL")
+S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
 S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
 S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 S3_BUCKET = os.getenv("S3_BUCKET", "content-assets")
-S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL")
+MEDIA_URL_TTL_SECONDS = int(os.getenv("MEDIA_URL_TTL_SECONDS", str(7 * 24 * 60 * 60)))
 
 AUTOPOSTER_URL = os.getenv("AUTOPOSTER_URL")
 AUTOPOSTER_TOKEN = os.getenv("AUTOPOSTER_TOKEN")
@@ -146,7 +148,7 @@ async def generate_image_bytes(prompt: str) -> dict[str, Any]:
 
 
 async def review_image(image_bytes: bytes, mime_type: str, content_context: str, visual_prompt: str) -> dict[str, Any]:
-    """Vision QA. If the configured model rejects multimodal input, the asset stays in review."""
+    """Vision QA. Provider incompatibility leaves the asset in review, never fake-approved."""
     if not LLM_API_KEY:
         return {"overall": 0.0, "passed": False, "notes": ["LLM_API_KEY is not configured for visual QA"]}
 
@@ -155,10 +157,7 @@ async def review_image(image_bytes: bytes, mime_type: str, content_context: str,
     payload = {
         "model": LLM_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a strict art director and visual QA reviewer. Return JSON only.",
-            },
+            {"role": "system", "content": "You are a strict art director and visual QA reviewer. Return JSON only."},
             {
                 "role": "user",
                 "content": [
@@ -173,10 +172,7 @@ async def review_image(image_bytes: bytes, mime_type: str, content_context: str,
                             f"\nContent: {content_context}\nVisual prompt: {visual_prompt}"
                         ),
                     },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime_type};base64,{encoded}"},
-                    },
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{encoded}"}},
                 ],
             },
         ],
@@ -194,33 +190,53 @@ async def review_image(image_bytes: bytes, mime_type: str, content_context: str,
             and float(result.get("text_safety", 0)) >= MEDIA_QUALITY_THRESHOLD
         )
         return result
-    except Exception as exc:  # provider incompatibility should never fake approval
+    except Exception as exc:
         return {"overall": 0.0, "passed": False, "notes": [f"visual QA failed: {exc}"]}
 
 
+def _s3_client(endpoint_url: str):
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=S3_ACCESS_KEY,
+        aws_secret_access_key=S3_SECRET_KEY,
+        region_name=S3_REGION,
+    )
+
+
 async def store_media(image_bytes: bytes, mime_type: str, content_item_id: str) -> dict[str, Any]:
+    """Store an accepted asset privately and return a public or time-limited delivery URL."""
     if not (S3_ENDPOINT_URL and S3_ACCESS_KEY and S3_SECRET_KEY):
         return {"status": "skipped", "reason": "S3 storage is not configured"}
 
     extension = "jpg" if mime_type in {"image/jpeg", "image/jpg"} else "png"
     key = f"content/{content_item_id}/{uuid.uuid4().hex}.{extension}"
 
-    def _put_object() -> None:
-        client = boto3.client(
-            "s3",
-            endpoint_url=S3_ENDPOINT_URL,
-            aws_access_key_id=S3_ACCESS_KEY,
-            aws_secret_access_key=S3_SECRET_KEY,
-            region_name=S3_REGION,
-        )
-        client.put_object(Bucket=S3_BUCKET, Key=key, Body=image_bytes, ContentType=mime_type)
+    def _put_and_url() -> tuple[str, str]:
+        internal_client = _s3_client(S3_ENDPOINT_URL)
+        internal_client.put_object(Bucket=S3_BUCKET, Key=key, Body=image_bytes, ContentType=mime_type)
 
-    await asyncio.to_thread(_put_object)
-    if S3_PUBLIC_BASE_URL:
-        url = f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{key}"
-    else:
-        url = f"{S3_ENDPOINT_URL.rstrip('/')}/{S3_BUCKET}/{key}"
-    return {"status": "passed", "url": url, "key": key, "bucket": S3_BUCKET}
+        if S3_PUBLIC_BASE_URL:
+            return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{key}", "public"
+
+        signing_endpoint = S3_PUBLIC_ENDPOINT_URL or S3_ENDPOINT_URL
+        signing_client = _s3_client(signing_endpoint)
+        signed_url = signing_client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": S3_BUCKET, "Key": key},
+            ExpiresIn=MEDIA_URL_TTL_SECONDS,
+        )
+        return signed_url, "presigned"
+
+    url, access_mode = await asyncio.to_thread(_put_and_url)
+    return {
+        "status": "passed",
+        "url": url,
+        "key": key,
+        "bucket": S3_BUCKET,
+        "access_mode": access_mode,
+        "expires_in": MEDIA_URL_TTL_SECONDS if access_mode == "presigned" else None,
+    }
 
 
 async def create_reviewed_media(prompt: str, content_context: str, content_item_id: str) -> dict[str, Any]:
@@ -240,6 +256,7 @@ async def create_reviewed_media(prompt: str, content_context: str, content_item_
             return {
                 "status": "passed",
                 "url": stored["url"],
+                "storage": {k: v for k, v in stored.items() if k not in {"url", "status"}},
                 "mime_type": generated["mime_type"],
                 "review": review,
                 "attempts": history,
