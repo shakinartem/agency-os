@@ -1,4 +1,4 @@
-"""App-level config that reads from environment variables and .env."""
+"""Application configuration for Content Factory."""
 
 from pathlib import Path
 
@@ -10,10 +10,8 @@ ENV_FILE = ROOT_DIR / ".env"
 
 
 class AppConfig(BaseSettings):
-    """Centralised configuration for the FastAPI application."""
-
-    app_name: str = "Agency OS API"
-    app_version: str = "0.1.0"
+    app_name: str = "Content Factory API"
+    app_version: str = "0.2.0"
     app_env: str = Field(default="development", validation_alias=AliasChoices("APP_ENV", "app_env"))
     debug: bool = Field(default=False, validation_alias=AliasChoices("APP_DEBUG", "DEBUG", "debug"))
 
@@ -23,7 +21,24 @@ class AppConfig(BaseSettings):
     jwt_expire_minutes: int = 60 * 24
 
     database_url: str = "sqlite+aiosqlite:///./agency_os.db"
+    redis_url: str = "redis://localhost:6380/0"
     cors_origins: list[str] = ["*"]
+
+    # Provider-agnostic runtime settings. Any OpenAI-compatible text endpoint can be used.
+    llm_base_url: str = "https://api.openai.com/v1"
+    llm_api_key: str | None = None
+    llm_model: str = "gpt-5.6"
+    image_api_url: str | None = None
+    image_api_key: str | None = None
+    image_model: str = "gpt-image-1.5"
+
+    autoposter_url: str | None = None
+    autoposter_token: str | None = None
+
+    quality_threshold: float = 0.87
+    factuality_threshold: float = 0.95
+    brand_voice_threshold: float = 0.85
+    max_revision_attempts: int = 2
 
     model_config = {
         "env_prefix": "",
