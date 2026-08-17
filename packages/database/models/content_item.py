@@ -26,8 +26,8 @@ class ContentItem(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # Content Factory fields. The canonical item is immutable in spirit: every AI/manual
-    # rewrite is appended to content_versions while these fields point at the current best version.
+    # Content Factory fields. Every rewrite is appended to content_versions while these
+    # columns point at the current best canonical version.
     task: Mapped[str | None] = mapped_column(Text, nullable=True)
     topic: Mapped[str | None] = mapped_column(String(500), nullable=True)
     goal: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -37,6 +37,7 @@ class ContentItem(Base, TimestampMixin):
     platforms: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
     visual_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     structured_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=dict)
+    research_sources: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     current_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
