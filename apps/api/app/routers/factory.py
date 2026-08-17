@@ -1,5 +1,6 @@
 """Content Factory orchestration API."""
 
+import os
 import uuid
 from typing import Any
 
@@ -29,6 +30,18 @@ def _json(row: Any) -> dict[str, Any]:
             value = value.value
         data[column.name] = value
     return data
+
+
+@router.get("/capabilities")
+async def capabilities(_: User = Depends(get_current_user)):
+    """Return configuration readiness without exposing credentials."""
+    return {
+        "llm": bool(config.llm_api_key),
+        "research": bool(os.getenv("TAVILY_API_KEY")),
+        "image_generation": bool(config.image_api_key or config.llm_api_key),
+        "object_storage": all(bool(os.getenv(name)) for name in ("S3_ENDPOINT_URL", "S3_ACCESS_KEY", "S3_SECRET_KEY")),
+        "autoposter": bool(config.autoposter_url),
+    }
 
 
 @router.post("/runs", status_code=status.HTTP_202_ACCEPTED)
@@ -75,7 +88,11 @@ async def list_runs(
 ):
     stmt = select(GenerationRun).order_by(GenerationRun.created_at.desc()).limit(200)
     if project_id:
-        stmt = stmt.where(GenerationRun.project_id == uuid.UUID(project_id))
+        try:
+            parsed_project_id = uuid.UUID(project_id)
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid project_id") from exc
+        stmt = stmt.where(GenerationRun.project_id == parsed_project_id)
     rows = (await db.execute(stmt)).scalars().all()
     return [_json(row) for row in rows]
 
@@ -109,6 +126,9 @@ async def upsert_brand_profile(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    project = await db.scalar(select(Project).where(Project.id == project_id))
+    if not project:
+        raise HTTPException(404, "Project not found")
     row = await db.scalar(select(BrandProfile).where(BrandProfile.project_id == project_id))
     if row is None:
         row = BrandProfile(project_id=project_id, **body.model_dump())
@@ -139,8 +159,15 @@ async def create_rubric(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
+    try:
+        project_id = uuid.UUID(body.project_id)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid project_id") from exc
+    project = await db.scalar(select(Project).where(Project.id == project_id))
+    if not project:
+        raise HTTPException(404, "Project not found")
     row = Rubric(
-        project_id=uuid.UUID(body.project_id),
+        project_id=project_id,
         name=body.name,
         description=body.description,
         goal=body.goal,
@@ -165,3 +192,18 @@ async def list_outbox(
         stmt = stmt.join(ContentItem, ContentItem.id == ExportDelivery.content_item_id).where(ContentItem.project_id == project_id)
     rows = (await db.execute(stmt)).scalars().all()
     return [_json(row) for row in rows]
+
+
+@router.post("/outbox/{delivery_id}/send", status_code=status.HTTP_202_ACCEPTED)
+async def send_outbox_delivery(
+    delivery_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    delivery = await db.scalar(select(ExportDelivery).where(ExportDelivery.id == delivery_id))
+    if not delivery:
+        raise HTTPException(404, "Export delivery not found")
+    if delivery.payload.get("status") != "approved":
+        raise HTTPException(409, "Only approved content packages can be sent to Autoposter")
+    queue.send_task("content_factory.send_delivery", args=[str(delivery.id)])
+    return {"id": str(delivery.id), "status": "queued_for_delivery"}
