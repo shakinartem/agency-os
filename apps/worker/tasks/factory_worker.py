@@ -1,7 +1,8 @@
 """Production Content Factory worker.
 
 Deterministic pipeline:
-research -> draft -> evaluate/revise -> humanize -> adapt -> media/vision QA -> final QA -> package -> optional export.
+project knowledge -> live research -> draft -> evaluate/revise -> humanize -> adapt ->
+media/vision QA -> final QA -> package -> optional export.
 Every meaningful stage is persisted so failures are diagnosable and retryable.
 """
 
@@ -39,6 +40,7 @@ from database.models import (
 )
 
 from .content_package import validate_content_package
+from .knowledge import knowledge_refs, retrieve_knowledge
 from .providers import (
     IMAGE_MODEL,
     LLM_MODEL,
@@ -56,7 +58,7 @@ QUALITY_THRESHOLD = float(os.getenv("QUALITY_THRESHOLD", "0.87"))
 FACTUALITY_THRESHOLD = float(os.getenv("FACTUALITY_THRESHOLD", "0.95"))
 BRAND_VOICE_THRESHOLD = float(os.getenv("BRAND_VOICE_THRESHOLD", "0.85"))
 MAX_REVISIONS = int(os.getenv("MAX_REVISION_ATTEMPTS", "2"))
-PROMPT_VERSION = "factory-v2-research-media"
+PROMPT_VERSION = "factory-v3-knowledge-research-media"
 
 
 def _brand_context(profile: BrandProfile | None) -> dict[str, Any]:
@@ -138,20 +140,62 @@ def _passes(score: dict[str, Any]) -> bool:
     )
 
 
+async def _knowledge(session, run: GenerationRun) -> list[dict[str, Any]]:
+    if not (run.options or {}).get("use_knowledge", True):
+        return []
+    step = await _stage(
+        session,
+        run,
+        "knowledge_retrieve",
+        {"query": run.task},
+        provider="postgres-fts",
+        model=None,
+    )
+    chunks = await retrieve_knowledge(session, run.project_id, run.task)
+    result = {
+        "count": len(chunks),
+        "refs": knowledge_refs(chunks),
+    }
+    status = GenerationStepStatus.passed if chunks else GenerationStepStatus.skipped
+    await _complete_step(session, step, result, status=status)
+    return chunks
+
+
+async def _research(session, run: GenerationRun) -> list[dict[str, Any]]:
+    if not (run.options or {}).get("use_research", True):
+        return []
+    step = await _stage(session, run, "research", {"query": run.task}, provider="tavily", model=None)
+    result = await research_web(run.task)
+    status = GenerationStepStatus.passed if result.get("status") == "passed" else GenerationStepStatus.skipped
+    await _complete_step(session, step, result, status=status)
+    return result.get("sources") or []
+
+
 async def _evaluate(
     session,
     run: GenerationRun,
     item: ContentItem,
     brand: dict[str, Any],
     sources: list[dict[str, Any]],
+    knowledge_chunks: list[dict[str, Any]],
     stage_name: str = "evaluate",
 ) -> dict[str, Any]:
-    step = await _stage(session, run, stage_name, {"content_item_id": str(item.id), "sources_count": len(sources)})
+    step = await _stage(session, run, stage_name, {
+        "content_item_id": str(item.id),
+        "sources_count": len(sources),
+        "knowledge_chunks_count": len(knowledge_chunks),
+    })
     result = await chat_json(
         "You are a strict senior content editor and fact-risk reviewer. Return JSON only.",
         f"""Evaluate this content from 0 to 1. Do not reward polished nonsense.
-Factuality means externally checkable claims are supported by supplied research sources or brand context; otherwise they must be cautious/general rather than invented.
+Factuality rules:
+- company/product/internal claims may be supported by Brand Brain or Project Knowledge;
+- external/current claims may be supported by Research Sources;
+- unsupported checkable claims must lower factuality even when they sound plausible;
+- cautious general reasoning is allowed when it is clearly not presented as a sourced fact.
+Do not reveal private project knowledge in your review output.
 Brand context: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Research sources: {json.dumps(sources, ensure_ascii=False)}
 Content: {json.dumps(item.structured_json or {"title": item.title, "body": item.body}, ensure_ascii=False)}
 Return exactly: {{"overall":0.0,"factuality":0.0,"brand_voice":0.0,"clarity":0.0,"hook":0.0,"usefulness":0.0,"originality":0.0,"policy_passed":true,"notes":[]}}""",
@@ -176,16 +220,6 @@ Return exactly: {{"overall":0.0,"factuality":0.0,"brand_voice":0.0,"clarity":0.0
     run.quality_score = ev.overall
     await _complete_step(session, step, result)
     return result
-
-
-async def _research(session, run: GenerationRun) -> list[dict[str, Any]]:
-    if not (run.options or {}).get("use_research", True):
-        return []
-    step = await _stage(session, run, "research", {"query": run.task}, provider="tavily", model=None)
-    result = await research_web(run.task)
-    status = GenerationStepStatus.passed if result.get("status") == "passed" else GenerationStepStatus.skipped
-    await _complete_step(session, step, result, status=status)
-    return result.get("sources") or []
 
 
 async def _generate_media(session, run: GenerationRun, item: ContentItem) -> MediaAsset:
@@ -216,13 +250,17 @@ async def _generate_media(session, run: GenerationRun, item: ContentItem) -> Med
     )
     content_context = json.dumps({"title": item.title, "body": item.body, "goal": item.goal}, ensure_ascii=False)
     result = await create_reviewed_media(item.visual_prompt, content_context, str(item.id))
-    asset.metadata_json = {"attempts": result.get("attempts") or [], "reason": result.get("reason")}
+    asset.metadata_json = {
+        "attempts": result.get("attempts") or [],
+        "reason": result.get("reason"),
+        "storage": result.get("storage") or {},
+    }
     if result.get("status") == "passed":
         asset.url = result.get("url")
         asset.mime_type = result.get("mime_type")
         asset.quality_score = float((result.get("review") or {}).get("overall", 0))
         asset.status = MediaStatus.ready
-        await _complete_step(session, step, {k: v for k, v in result.items() if k != "bytes"})
+        await _complete_step(session, step, result)
     else:
         asset.status = MediaStatus.review
         await _complete_step(session, step, result, status=GenerationStepStatus.failed)
@@ -241,8 +279,9 @@ async def _package(session, item: ContentItem) -> ExportDelivery:
         select(Evaluation).where(Evaluation.content_item_id == item.id).order_by(Evaluation.created_at.desc())
     )).scalars().all()
     latest_eval = evaluations[0] if evaluations else None
-    media_score = max((a.quality_score or 0 for a in media), default=None)
+    media_score = max((asset.quality_score or 0 for asset in media), default=None)
 
+    # Private Knowledge Base lineage is intentionally NOT included in this external package.
     raw_payload = {
         "schema_version": "content-package/1.0",
         "content_id": str(item.id),
@@ -335,26 +374,34 @@ async def _process(run_id: str) -> None:
 
             brand_profile = await session.scalar(select(BrandProfile).where(BrandProfile.project_id == run.project_id))
             brand = _brand_context(brand_profile)
+            knowledge_chunks = await _knowledge(session, run)
+            internal_refs = knowledge_refs(knowledge_chunks)
             sources = await _research(session, run)
 
             step = await _stage(session, run, "draft", {
                 "task": run.task,
                 "content_type": run.content_type,
                 "platforms": run.platforms,
+                "knowledge_chunks_count": len(knowledge_chunks),
                 "sources_count": len(sources),
             })
             draft = await chat_json(
-                "You are a senior content strategist and writer. Return JSON only. Never invent company or research facts.",
+                "You are a senior content strategist and writer. Return JSON only. Never invent company or research facts and never expose private source text verbatim unless the task requires a direct factual statement.",
                 f"""Create canonical content for the task. It must be useful before promotional.
-Use research only when a claim is supported by the supplied sources. Do not fabricate citations.
+Evidence priority:
+1. Brand Brain defines identity, tone and explicit rules.
+2. Project Knowledge is private first-party evidence for company/product/process facts.
+3. Research Sources are external evidence for current/public claims.
+Do not fabricate citations or mention internal document names in public-facing copy.
 Task: {run.task}
 Content type: {run.content_type}
 Target platforms: {run.platforms}
 Brand: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Research: {json.dumps(sources, ensure_ascii=False)}
 Return {{"title":"","hook":"","body":"","cta":"","hashtags":[],"visual_prompt":"","topic":"","goal":"","source_refs":[]}}.""",
             )
-            content_type = ContentType(run.content_type) if run.content_type in {x.value for x in ContentType} else ContentType.other
+            content_type = ContentType(run.content_type) if run.content_type in {value.value for value in ContentType} else ContentType.other
             item = ContentItem(
                 project_id=run.project_id,
                 type=content_type,
@@ -365,6 +412,7 @@ Return {{"title":"","hook":"","body":"","cta":"","hashtags":[],"visual_prompt":"
                 goal=draft.get("goal"),
                 platforms=run.platforms,
                 research_sources=sources,
+                knowledge_refs=internal_refs,
             )
             session.add(item)
             await session.flush()
@@ -372,15 +420,16 @@ Return {{"title":"","hook":"","body":"","cta":"","hashtags":[],"visual_prompt":"
             await _save_version(session, item, run, "draft", draft)
             await _complete_step(session, step, draft)
 
-            score = await _evaluate(session, run, item, brand, sources)
+            score = await _evaluate(session, run, item, brand, sources, knowledge_chunks)
             attempt = 0
             while not _passes(score) and attempt < MAX_REVISIONS:
                 attempt += 1
                 step = await _stage(session, run, "revise", {"attempt": attempt, "notes": score.get("notes") or []})
                 revised = await chat_json(
-                    "You are a senior editor. Return JSON only. Preserve true claims and source_refs.",
+                    "You are a senior editor. Return JSON only. Preserve true claims and public source_refs; never reveal private Knowledge Base metadata.",
                     f"""Improve the content using review notes. Do not add unsupported facts.
 Brand: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Research: {json.dumps(sources, ensure_ascii=False)}
 Review: {json.dumps(score, ensure_ascii=False)}
 Content: {json.dumps(item.structured_json, ensure_ascii=False)}
@@ -388,7 +437,7 @@ Return the same canonical JSON schema.""",
                 )
                 await _save_version(session, item, run, "revise", revised)
                 await _complete_step(session, step, revised)
-                score = await _evaluate(session, run, item, brand, sources)
+                score = await _evaluate(session, run, item, brand, sources, knowledge_chunks)
 
             if not _passes(score):
                 item.status = ContentStatus.review
@@ -402,7 +451,8 @@ Return the same canonical JSON schema.""",
             humanized = await chat_json(
                 "You are a natural-language editor. Remove generic AI cadence, clichés and sterile transitions without changing facts. Return JSON only.",
                 f"""Brand: {json.dumps(brand, ensure_ascii=False)}
-Rewrite naturally while preserving source_refs and factual meaning:
+Project Knowledge was already used to ground the canonical content. Do not introduce new facts.
+Rewrite naturally while preserving public source_refs and factual meaning:
 {json.dumps(item.structured_json, ensure_ascii=False)}
 Return the same canonical JSON schema.""",
             )
@@ -414,7 +464,7 @@ Return the same canonical JSON schema.""",
             for platform in (run.platforms or ["telegram"]):
                 step = await _stage(session, run, f"adapt:{platform}")
                 variant = await chat_json(
-                    "You are a platform editor. Preserve meaning and facts; adapt presentation only. Return JSON only.",
+                    "You are a platform editor. Preserve meaning and facts; adapt presentation only. Do not add new claims. Return JSON only.",
                     f"""Platform: {platform}
 Canonical: {json.dumps(item.structured_json, ensure_ascii=False)}
 Return {{"title":"","body":"","cta":"","hashtags":[],"blocks":[]}}.""",
@@ -436,7 +486,15 @@ Return {{"title":"","body":"","cta":"","hashtags":[],"blocks":[]}}.""",
                 await session.commit()
                 media_asset = await _generate_media(session, run, item)
 
-            final_score = await _evaluate(session, run, item, brand, sources, stage_name="final_evaluate")
+            final_score = await _evaluate(
+                session,
+                run,
+                item,
+                brand,
+                sources,
+                knowledge_chunks,
+                stage_name="final_evaluate",
+            )
             media_required = bool((run.options or {}).get("generate_media", True))
             media_ok = not media_required or (media_asset is not None and media_asset.status == MediaStatus.ready)
             if _passes(final_score) and media_ok:
