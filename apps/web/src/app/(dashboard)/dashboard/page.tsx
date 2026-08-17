@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { useProject } from "@/context/ProjectContext";
-import { Bot, CheckCircle2, Clock3, Factory, Sparkles, TriangleAlert } from "lucide-react";
+import { Bot, CheckCircle2, Clock3, Factory, Search, Sparkles, TriangleAlert } from "lucide-react";
 
 interface Run {
   id: string;
@@ -20,6 +20,14 @@ interface Run {
   created_at?: string;
 }
 
+interface Capabilities {
+  llm: boolean;
+  research: boolean;
+  image_generation: boolean;
+  object_storage: boolean;
+  autoposter: boolean;
+}
+
 const platformOptions = ["telegram", "vk", "instagram", "dzen"];
 
 export default function DashboardPage() {
@@ -28,7 +36,14 @@ export default function DashboardPage() {
   const [task, setTask] = useState("");
   const [contentType, setContentType] = useState("post");
   const [platforms, setPlatforms] = useState<string[]>(["telegram"]);
+  const [useResearch, setUseResearch] = useState(true);
   const [generateMedia, setGenerateMedia] = useState(true);
+
+  const { data: capabilities } = useQuery({
+    queryKey: ["factory-capabilities"],
+    queryFn: () => api.get<Capabilities>("/factory/capabilities"),
+    refetchInterval: 15000,
+  });
 
   const { data: runs = [] } = useQuery({
     queryKey: ["factory-runs", current?.id],
@@ -42,7 +57,7 @@ export default function DashboardPage() {
       task,
       content_type: contentType,
       platforms,
-      use_research: true,
+      use_research: useResearch,
       generate_media: generateMedia,
       auto_export: false,
     }),
@@ -66,6 +81,14 @@ export default function DashboardPage() {
     { label: "Ошибки", value: stats.failed, icon: Bot },
   ];
 
+  const capabilityCards = capabilities ? [
+    ["LLM", capabilities.llm],
+    ["Research", capabilities.research],
+    ["Images", capabilities.image_generation],
+    ["Storage", capabilities.object_storage],
+    ["Autoposter", capabilities.autoposter],
+  ] as const : [];
+
   const togglePlatform = (platform: string) => {
     setPlatforms((prev) => prev.includes(platform) ? prev.filter((p) => p !== platform) : [...prev, platform]);
   };
@@ -75,8 +98,20 @@ export default function DashboardPage() {
       <div>
         <div className="flex items-center gap-2 text-sm font-medium text-primary"><Factory className="h-4 w-4" /> Content Factory</div>
         <h1 className="mt-1 text-3xl font-bold tracking-tight">Что производим?</h1>
-        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">Дайте задачу высокого уровня. Фабрика создаст канонический материал, проверит качество, очеловечит, адаптирует под площадки, подготовит визуал и пакет для автопостера.</p>
+        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">Дайте задачу высокого уровня. Фабрика исследует тему, создаст канонический материал, проверит качество, очеловечит, адаптирует под площадки, подготовит визуал и пакет для автопостера.</p>
       </div>
+
+      {capabilityCards.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          {capabilityCards.map(([label, configured]) => (
+            <div key={label} className="flex items-center gap-2 rounded-full border bg-card px-3 py-1.5 text-xs">
+              <span className={`h-2 w-2 rounded-full ${configured ? "bg-emerald-500" : "bg-amber-500"}`} />
+              <span>{label}</span>
+              <span className="text-muted-foreground">{configured ? "ready" : "not configured"}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <Card className="overflow-hidden">
         <CardContent className="p-5">
@@ -102,19 +137,27 @@ export default function DashboardPage() {
             ))}
 
             <label className="flex items-center gap-2 text-xs text-muted-foreground">
+              <input type="checkbox" checked={useResearch} onChange={(e) => setUseResearch(e.target.checked)} />
+              <Search className="h-3.5 w-3.5" /> live research
+            </label>
+
+            <label className="flex items-center gap-2 text-xs text-muted-foreground">
               <input type="checkbox" checked={generateMedia} onChange={(e) => setGenerateMedia(e.target.checked)} />
               генерировать визуал
             </label>
 
             <button
               onClick={() => createRun.mutate()}
-              disabled={!current || !task.trim() || platforms.length === 0 || createRun.isPending}
+              disabled={!current || !task.trim() || platforms.length === 0 || createRun.isPending || capabilities?.llm === false}
               className="ml-auto inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Sparkles className="h-4 w-4" /> {createRun.isPending ? "Запускаю…" : "Запустить производство"}
             </button>
           </div>
           {!current && <p className="mt-3 text-xs text-amber-600">Сначала выберите проект в верхней панели.</p>}
+          {capabilities?.llm === false && <p className="mt-3 text-xs text-amber-600">LLM не настроен: добавьте LLM_API_KEY перед запуском производства.</p>}
+          {useResearch && capabilities?.research === false && <p className="mt-3 text-xs text-muted-foreground">Research provider не настроен — этап будет явно пропущен, без выдуманных источников.</p>}
+          {generateMedia && (!capabilities?.image_generation || !capabilities?.object_storage) && capabilities && <p className="mt-3 text-xs text-muted-foreground">Для автоматического визуала нужны image provider и object storage; иначе материал остановится на media review.</p>}
           {createRun.isError && <p className="mt-3 text-xs text-red-600">Не удалось запустить задачу: {(createRun.error as Error).message}</p>}
         </CardContent>
       </Card>
