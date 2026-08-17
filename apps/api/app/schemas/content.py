@@ -1,8 +1,9 @@
-"""Content-item CRUD schemas."""
+"""Content-item CRUD schemas used by the review workspace."""
 
 from datetime import datetime
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ContentItemCreate(BaseModel):
@@ -11,6 +12,10 @@ class ContentItemCreate(BaseModel):
     status: str = "draft"
     title: str
     body: str | None = None
+    task: str | None = None
+    topic: str | None = None
+    goal: str | None = None
+    platforms: list[str] = Field(default_factory=list)
 
 
 class ContentItemUpdate(BaseModel):
@@ -18,6 +23,10 @@ class ContentItemUpdate(BaseModel):
     status: str | None = None
     title: str | None = None
     body: str | None = None
+    hook: str | None = None
+    cta: str | None = None
+    hashtags: list[str] | None = None
+    visual_prompt: str | None = None
 
 
 class ContentItemRead(BaseModel):
@@ -27,6 +36,17 @@ class ContentItemRead(BaseModel):
     status: str
     title: str
     body: str | None = None
+    task: str | None = None
+    topic: str | None = None
+    goal: str | None = None
+    hook: str | None = None
+    cta: str | None = None
+    hashtags: list[str] | None = None
+    platforms: list[str] | None = None
+    visual_prompt: str | None = None
+    structured_json: dict[str, Any] | None = None
+    quality_score: float | None = None
+    current_version: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
