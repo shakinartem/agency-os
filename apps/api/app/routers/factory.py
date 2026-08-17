@@ -89,9 +89,12 @@ async def create_run(
     db.add(run)
     await db.flush()
     await db.refresh(run)
+    response = _json(run)
 
+    # Durable state must exist before a fast Celery worker can consume the task.
+    await db.commit()
     queue.send_task("content_factory.process_run", args=[str(run.id)])
-    return _json(run)
+    return response
 
 
 @router.get("/runs")
@@ -187,7 +190,7 @@ async def approve_content(
             output_json={"approved": True},
         ))
     item.status = ContentStatus.adapting
-    await db.flush()
+    await db.commit()
     queue.send_task("content_factory.approve_content", args=[str(item.id)])
     return {"id": str(item.id), "status": "approved_for_downstream_processing"}
 
@@ -220,8 +223,10 @@ async def regenerate_content(
     db.add(run)
     await db.flush()
     await db.refresh(run)
+    response = _json(run)
+    await db.commit()
     queue.send_task("content_factory.process_run", args=[str(run.id)])
-    return _json(run)
+    return response
 
 
 @router.get("/brand/{project_id}")
