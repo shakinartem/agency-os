@@ -141,6 +141,25 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: agency-beat
+    command: ["celery", "-A", "apps.worker.tasks.dispatch_tasks", "beat", "--loglevel=info"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://agency:agency_secret@postgres:5432/agency_os
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
 volumes:
   pgdata:
     name: agency-pgdata
