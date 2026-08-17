@@ -11,8 +11,22 @@ permissions:
 
 jobs:
   python:
-    name: Python compile, imports and tests
+    name: Python, migrations and contract tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: agency
+          POSTGRES_PASSWORD: agency_secret
+          POSTGRES_DB: agency_os
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agency -d agency_os"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -32,7 +46,14 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
         run: python -m compileall -q apps/api apps/worker packages/database
 
-      - name: Import API and worker
+      - name: Apply database migrations on PostgreSQL
+        working-directory: packages/database
+        env:
+          PYTHONPATH: ${{ github.workspace }}/packages
+          DATABASE_URL: postgresql+psycopg2://agency:agency_secret@localhost:5432/agency_os
+        run: alembic upgrade head
+
+      - name: Import API and registered worker tasks
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
           DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
@@ -40,6 +61,7 @@ jobs:
         run: |
           python -c "from app.main import app as api_app; print(api_app.title)"
           python -c "from apps.worker.tasks.factory_worker import app as worker_app; print(worker_app.main)"
+          python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'; print(approve_content.name)"
 
       - name: Run worker contract tests
         env:
