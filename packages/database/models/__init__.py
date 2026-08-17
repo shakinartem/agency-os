@@ -24,6 +24,7 @@ from .content_factory import (
     MediaAsset,
     ExportDelivery,
 )
+from .knowledge import KnowledgeDocument, KnowledgeChunk
 
 __all__ = [
     "User",
@@ -48,4 +49,6 @@ __all__ = [
     "Evaluation",
     "MediaAsset",
     "ExportDelivery",
+    "KnowledgeDocument",
+    "KnowledgeChunk",
 ]
