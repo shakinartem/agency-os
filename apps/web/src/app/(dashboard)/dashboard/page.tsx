@@ -59,6 +59,13 @@ export default function DashboardPage() {
     failed: runs.filter((r) => r.status === "failed").length,
   }), [runs]);
 
+  const statCards = [
+    { label: "В производстве", value: stats.active, icon: Clock3 },
+    { label: "Нужен review", value: stats.review, icon: TriangleAlert },
+    { label: "Готово", value: stats.ready, icon: CheckCircle2 },
+    { label: "Ошибки", value: stats.failed, icon: Bot },
+  ];
+
   const togglePlatform = (platform: string) => {
     setPlatforms((prev) => prev.includes(platform) ? prev.filter((p) => p !== platform) : [...prev, platform]);
   };
@@ -113,19 +120,17 @@ export default function DashboardPage() {
       </Card>
 
       <div className="grid gap-4 md:grid-cols-4">
-        {[
-          ["В производстве", stats.active, Clock3],
-          ["Нужен review", stats.review, TriangleAlert],
-          ["Готово", stats.ready, CheckCircle2],
-          ["Ошибки", stats.failed, Bot],
-        ].map(([label, value, Icon]) => (
-          <Card key={label as string}>
-            <CardContent className="flex items-center justify-between p-4">
-              <div><p className="text-xs text-muted-foreground">{label as string}</p><p className="mt-1 text-2xl font-bold">{value as number}</p></div>
-              <Icon className="h-5 w-5 text-muted-foreground" />
-            </CardContent>
-          </Card>
-        ))}
+        {statCards.map((card) => {
+          const Icon = card.icon;
+          return (
+            <Card key={card.label}>
+              <CardContent className="flex items-center justify-between p-4">
+                <div><p className="text-xs text-muted-foreground">{card.label}</p><p className="mt-1 text-2xl font-bold">{card.value}</p></div>
+                <Icon className="h-5 w-5 text-muted-foreground" />
+              </CardContent>
+            </Card>
+          );
+        })}
       </div>
 
       <Card>
