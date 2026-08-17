@@ -46,6 +46,7 @@ class ContentItemRead(BaseModel):
     visual_prompt: str | None = None
     structured_json: dict[str, Any] | None = None
     research_sources: list[dict[str, Any]] | None = None
+    knowledge_refs: list[dict[str, Any]] | None = None
     quality_score: float | None = None
     current_version: int = 0
     created_at: datetime | None = None
