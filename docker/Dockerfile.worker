@@ -10,6 +10,6 @@ COPY packages/ packages/
 COPY apps/worker/ apps/worker/
 COPY integrations/ integrations/
 
-ENV PYTHONPATH=/app/packages
+ENV PYTHONPATH=/app:/app/packages
 
-CMD ["celery", "-A", "apps.worker.tasks.worker", "worker", "--loglevel=info"]
+CMD ["celery", "-A", "apps.worker.tasks.factory_worker", "worker", "--loglevel=info"]
