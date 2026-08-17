@@ -9,7 +9,21 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import BrandProfile, ExportDelivery, GenerationRun, Project, Rubric, User
+from database.enums import ContentStatus, GenerationRunStatus, GenerationStepStatus
+from database.models import (
+    BrandProfile,
+    ContentItem,
+    ContentVariant,
+    ContentVersion,
+    Evaluation,
+    ExportDelivery,
+    GenerationRun,
+    GenerationStep,
+    MediaAsset,
+    Project,
+    Rubric,
+    User,
+)
 
 from ..config import config
 from ..database import get_db
@@ -109,6 +123,107 @@ async def get_run(
     return _json(run)
 
 
+@router.get("/content/{content_id}/detail")
+async def content_detail(
+    content_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
+    if not item:
+        raise HTTPException(404, "Content item not found")
+
+    versions = (await db.execute(
+        select(ContentVersion).where(ContentVersion.content_item_id == content_id).order_by(ContentVersion.version.desc())
+    )).scalars().all()
+    evaluations = (await db.execute(
+        select(Evaluation).where(Evaluation.content_item_id == content_id).order_by(Evaluation.created_at.desc())
+    )).scalars().all()
+    variants = (await db.execute(
+        select(ContentVariant).where(ContentVariant.content_item_id == content_id).order_by(ContentVariant.platform.asc())
+    )).scalars().all()
+    media = (await db.execute(
+        select(MediaAsset).where(MediaAsset.content_item_id == content_id).order_by(MediaAsset.created_at.desc())
+    )).scalars().all()
+    runs = (await db.execute(
+        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
+    )).scalars().all()
+    return {
+        "content": _json(item),
+        "versions": [_json(row) for row in versions],
+        "evaluations": [_json(row) for row in evaluations],
+        "variants": [_json(row) for row in variants],
+        "media": [_json(row) for row in media],
+        "runs": [_json(row) for row in runs],
+    }
+
+
+@router.post("/content/{content_id}/approve", status_code=status.HTTP_202_ACCEPTED)
+async def approve_content(
+    content_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
+    if not item:
+        raise HTTPException(404, "Content item not found")
+    if item.status == ContentStatus.archived:
+        raise HTTPException(409, "Archived content cannot be approved")
+
+    run = await db.scalar(
+        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
+    )
+    if run:
+        run.status = GenerationRunStatus.running
+        run.current_stage = "human_approved"
+        db.add(GenerationStep(
+            run_id=run.id,
+            stage="human_approve",
+            status=GenerationStepStatus.passed,
+            provider="human",
+            model=None,
+            prompt_version="manual-v1",
+            input_json={"user_id": str(user.id)},
+            output_json={"approved": True},
+        ))
+    item.status = ContentStatus.adapting
+    await db.flush()
+    queue.send_task("content_factory.approve_content", args=[str(item.id)])
+    return {"id": str(item.id), "status": "approved_for_downstream_processing"}
+
+
+@router.post("/content/{content_id}/regenerate", status_code=status.HTTP_202_ACCEPTED)
+async def regenerate_content(
+    content_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
+    if not item:
+        raise HTTPException(404, "Content item not found")
+    latest_run = await db.scalar(
+        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
+    )
+    options = dict(latest_run.options or {}) if latest_run else {
+        "use_research": True,
+        "generate_media": True,
+        "auto_export": False,
+    }
+    options["regenerated_from_content_id"] = str(content_id)
+    run = GenerationRun(
+        project_id=item.project_id,
+        task=item.task or item.topic or item.title,
+        content_type=item.type.value,
+        platforms=item.platforms or ["telegram"],
+        options=options,
+    )
+    db.add(run)
+    await db.flush()
+    await db.refresh(run)
+    queue.send_task("content_factory.process_run", args=[str(run.id)])
+    return _json(run)
+
+
 @router.get("/brand/{project_id}")
 async def get_brand_profile(
     project_id: uuid.UUID,
@@ -188,7 +303,6 @@ async def list_outbox(
 ):
     stmt = select(ExportDelivery).order_by(ExportDelivery.created_at.desc()).limit(200)
     if project_id:
-        from database.models import ContentItem
         stmt = stmt.join(ContentItem, ContentItem.id == ExportDelivery.content_item_id).where(ContentItem.project_id == project_id)
     rows = (await db.execute(stmt)).scalars().all()
     return [_json(row) for row in rows]
