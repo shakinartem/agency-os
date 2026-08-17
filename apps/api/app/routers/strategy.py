@@ -14,6 +14,7 @@ from ..config import config
 from ..database import get_db
 from ..dependencies import get_current_user
 from ..schemas.factory import RubricGenerateRequest
+from ..services.task_outbox import enqueue_task, nudge_dispatcher
 
 router = APIRouter(prefix="/strategy", tags=["content-strategy"])
 queue = Celery("content_strategy_api", broker=config.redis_url)
@@ -53,6 +54,7 @@ async def generate_rubrics(
             "strategy_goal": body.goal,
             "rubric_count": body.count,
             "use_research": body.use_research,
+            "use_knowledge": True,
             "generate_media": False,
             "auto_export": False,
         },
@@ -60,9 +62,15 @@ async def generate_rubrics(
     db.add(run)
     await db.flush()
     await db.refresh(run)
+    await enqueue_task(
+        db,
+        "content_factory.generate_rubrics",
+        args=[str(run.id)],
+        dedupe_key=f"run:{run.id}:rubrics",
+    )
     response = _json(run)
     await db.commit()
-    queue.send_task("content_factory.generate_rubrics", args=[str(run.id)])
+    nudge_dispatcher(queue)
     return response
 
 
