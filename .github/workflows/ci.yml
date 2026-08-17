@@ -63,11 +63,13 @@ jobs:
           python -c "from apps.worker.tasks.factory_worker import app as worker_app; print(worker_app.main)"
           python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'; print(approve_content.name)"
           python -c "from apps.worker.tasks.strategy_tasks import generate_rubrics; assert generate_rubrics.name == 'content_factory.generate_rubrics'; print(generate_rubrics.name)"
+          python -c "from apps.worker.tasks.knowledge import retrieve_knowledge; print(retrieve_knowledge.__name__)"
 
-      - name: Run worker contract tests
+      - name: Run API and worker tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
-        run: pytest -q apps/worker/tests
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+        run: pytest -q apps/api/tests apps/worker/tests
 
   web:
     name: Next.js production build
