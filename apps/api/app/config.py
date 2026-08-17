@@ -11,7 +11,7 @@ ENV_FILE = ROOT_DIR / ".env"
 
 class AppConfig(BaseSettings):
     app_name: str = "Content Factory API"
-    app_version: str = "0.2.0"
+    app_version: str = "0.3.0"
     app_env: str = Field(default="development", validation_alias=AliasChoices("APP_ENV", "app_env"))
     debug: bool = Field(default=False, validation_alias=AliasChoices("APP_DEBUG", "DEBUG", "debug"))
 
@@ -24,7 +24,6 @@ class AppConfig(BaseSettings):
     redis_url: str = "redis://localhost:6380/0"
     cors_origins: list[str] = ["*"]
 
-    # Provider-agnostic runtime settings. Any OpenAI-compatible text endpoint can be used.
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str | None = None
     llm_model: str = "gpt-5.6"
@@ -34,6 +33,8 @@ class AppConfig(BaseSettings):
 
     autoposter_url: str | None = None
     autoposter_token: str | None = None
+    performance_ingest_token: str | None = None
+    task_outbox_dispatch_batch: int = 50
 
     quality_threshold: float = 0.87
     factuality_threshold: float = 0.95

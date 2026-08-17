@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, agent/content-factory-core]
 
 permissions:
   contents: read
@@ -20,8 +20,7 @@ jobs:
           POSTGRES_USER: agency
           POSTGRES_PASSWORD: agency_secret
           POSTGRES_DB: agency_os
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U agency -d agency_os"
           --health-interval 5s
@@ -29,30 +28,25 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
       - name: Install backend and worker dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r apps/api/requirements.txt
           pip install -r apps/worker/requirements.txt
-
       - name: Compile Python sources
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
         run: python -m compileall -q apps/api apps/worker packages/database
-
       - name: Apply database migrations on PostgreSQL
         working-directory: packages/database
         env:
           PYTHONPATH: ${{ github.workspace }}/packages
           DATABASE_URL: postgresql+psycopg2://agency:agency_secret@localhost:5432/agency_os
         run: alembic upgrade head
-
       - name: Import API and registered worker tasks
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
@@ -61,15 +55,21 @@ jobs:
         run: |
           python -c "from app.main import app as api_app; print(api_app.title)"
           python -c "from apps.worker.tasks.factory_worker import app as worker_app; print(worker_app.main)"
-          python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'; print(approve_content.name)"
-          python -c "from apps.worker.tasks.strategy_tasks import generate_rubrics; assert generate_rubrics.name == 'content_factory.generate_rubrics'; print(generate_rubrics.name)"
-          python -c "from apps.worker.tasks.knowledge import retrieve_knowledge; print(retrieve_knowledge.__name__)"
-
-      - name: Run API and worker tests
+          python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'"
+          python -c "from apps.worker.tasks.strategy_tasks import generate_rubrics; assert generate_rubrics.name == 'content_factory.generate_rubrics'"
+          python -c "from apps.worker.tasks.batch_tasks import plan_batch; assert plan_batch.name == 'content_factory.plan_batch'"
+          python -c "from apps.worker.tasks.delivery_tasks import send_delivery_v2; assert send_delivery_v2.name == 'content_factory.send_delivery_v2'"
+          python -c "from apps.worker.tasks.dispatch_tasks import dispatch_task_outbox, execute_outbox_task; assert dispatch_task_outbox.name == 'content_factory.dispatch_task_outbox'; assert execute_outbox_task.name == 'content_factory.execute_outbox_task'"
+      - name: Run API tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
           DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
-        run: pytest -q apps/api/tests apps/worker/tests
+        run: pytest -q apps/api/tests
+      - name: Run worker tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+        run: pytest -q apps/worker/tests
 
   web:
     name: Next.js production build
@@ -79,16 +79,13 @@ jobs:
         working-directory: apps/web
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: apps/web/package.json
-
       - name: Install dependencies
         run: npm install
-
       - name: Build
         env:
           NEXT_PUBLIC_API_URL: http://localhost:8010
@@ -99,7 +96,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - name: Validate Compose configuration
         run: |
           cp .env.example .env

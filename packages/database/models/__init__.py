@@ -23,6 +23,11 @@ from .content_factory import (
     Evaluation,
     MediaAsset,
     ExportDelivery,
+    ProductionBatch,
+    ProductionBatchItem,
+    ReviewDecision,
+    PerformanceSnapshot,
+    TaskOutbox,
 )
 from .knowledge import KnowledgeDocument, KnowledgeChunk
 
@@ -49,6 +54,11 @@ __all__ = [
     "Evaluation",
     "MediaAsset",
     "ExportDelivery",
+    "ProductionBatch",
+    "ProductionBatchItem",
+    "ReviewDecision",
+    "PerformanceSnapshot",
+    "TaskOutbox",
     "KnowledgeDocument",
     "KnowledgeChunk",
 ]

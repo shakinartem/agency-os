@@ -20,7 +20,10 @@ from database.models import (
     GenerationRun,
     GenerationStep,
     MediaAsset,
+    ProductionBatch,
+    ProductionBatchItem,
     Project,
+    ReviewDecision,
     Rubric,
     User,
 )
@@ -28,7 +31,8 @@ from database.models import (
 from ..config import config
 from ..database import get_db
 from ..dependencies import get_current_user
-from ..schemas.factory import BrandProfileUpsert, RubricCreate, RunCreate
+from ..schemas.factory import BatchCreate, BrandProfileUpsert, ReviewDecisionPayload, RubricCreate, RunCreate
+from ..services.task_outbox import enqueue_task, nudge_dispatcher
 
 router = APIRouter(prefix="/factory", tags=["content-factory"])
 queue = Celery("content_factory_api", broker=config.redis_url)
@@ -46,63 +50,65 @@ def _json(row: Any) -> dict[str, Any]:
     return data
 
 
+async def _record_review(db: AsyncSession, *, item: ContentItem, user: User, action: str, body: ReviewDecisionPayload | None) -> ReviewDecision:
+    if body and body.action and body.action != action:
+        raise HTTPException(400, f"This endpoint records action={action}, not {body.action}")
+    row = ReviewDecision(
+        content_item_id=item.id,
+        user_id=user.id,
+        content_version=item.current_version,
+        action=action,
+        reason_codes=(body.reason_codes if body else []),
+        note=(body.note if body else None),
+        metadata_json=(body.metadata if body else {}),
+    )
+    db.add(row)
+    await db.flush()
+    return row
+
+
 @router.get("/capabilities")
 async def capabilities(_: User = Depends(get_current_user)):
-    """Return configuration readiness without exposing credentials."""
     return {
         "llm": bool(config.llm_api_key),
         "research": bool(os.getenv("TAVILY_API_KEY")),
         "image_generation": bool(config.image_api_key or config.llm_api_key),
         "object_storage": all(bool(os.getenv(name)) for name in ("S3_ENDPOINT_URL", "S3_ACCESS_KEY", "S3_SECRET_KEY")),
         "autoposter": bool(config.autoposter_url),
+        "performance_ingest": bool(config.performance_ingest_token),
+        "transactional_task_outbox": True,
     }
 
 
 @router.post("/runs", status_code=status.HTTP_202_ACCEPTED)
-async def create_run(
-    body: RunCreate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def create_run(body: RunCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     try:
         project_id = uuid.UUID(body.project_id)
     except ValueError as exc:
         raise HTTPException(400, "Invalid project_id") from exc
-
-    project = await db.scalar(select(Project).where(Project.id == project_id))
-    if not project:
+    if not await db.scalar(select(Project.id).where(Project.id == project_id)):
         raise HTTPException(404, "Project not found")
 
     options = {
         **body.options,
         "use_research": body.use_research,
+        "use_knowledge": body.use_knowledge,
         "generate_media": body.generate_media,
         "auto_export": body.auto_export,
     }
-    run = GenerationRun(
-        project_id=project_id,
-        task=body.task,
-        content_type=body.content_type,
-        platforms=body.platforms,
-        options=options,
-    )
+    run = GenerationRun(project_id=project_id, task=body.task, content_type=body.content_type, platforms=body.platforms, options=options)
     db.add(run)
     await db.flush()
     await db.refresh(run)
+    await enqueue_task(db, "content_factory.process_run", args=[str(run.id)], dedupe_key=f"run:{run.id}:process")
     response = _json(run)
-
-    # Durable state must exist before a fast Celery worker can consume the task.
     await db.commit()
-    queue.send_task("content_factory.process_run", args=[str(run.id)])
+    nudge_dispatcher(queue)
     return response
 
 
 @router.get("/runs")
-async def list_runs(
-    project_id: str | None = None,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def list_runs(project_id: str | None = None, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     stmt = select(GenerationRun).order_by(GenerationRun.created_at.desc()).limit(200)
     if project_id:
         try:
@@ -110,47 +116,104 @@ async def list_runs(
         except ValueError as exc:
             raise HTTPException(400, "Invalid project_id") from exc
         stmt = stmt.where(GenerationRun.project_id == parsed_project_id)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [_json(row) for row in rows]
+    return [_json(row) for row in (await db.execute(stmt)).scalars().all()]
 
 
 @router.get("/runs/{run_id}")
-async def get_run(
-    run_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def get_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     run = await db.scalar(select(GenerationRun).where(GenerationRun.id == run_id))
     if not run:
         raise HTTPException(404, "Generation run not found")
     return _json(run)
 
 
+@router.post("/batches", status_code=status.HTTP_202_ACCEPTED)
+async def create_batch(body: BatchCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    try:
+        project_id = uuid.UUID(body.project_id)
+    except ValueError as exc:
+        raise HTTPException(400, "Invalid project_id") from exc
+    if not await db.scalar(select(Project.id).where(Project.id == project_id)):
+        raise HTTPException(404, "Project not found")
+
+    options = {
+        **body.options,
+        "use_research": body.use_research,
+        "use_knowledge": body.use_knowledge,
+        "generate_media": body.generate_media,
+        "auto_export": body.auto_export,
+    }
+    planner_run = GenerationRun(
+        project_id=project_id,
+        task=f"Plan a production batch. Objective: {body.objective}",
+        content_type="batch_plan",
+        platforms=body.platforms,
+        options={**options, "content_mix": body.content_mix},
+    )
+    db.add(planner_run)
+    await db.flush()
+    batch = ProductionBatch(
+        project_id=project_id,
+        planner_run_id=planner_run.id,
+        objective=body.objective,
+        platforms=body.platforms,
+        content_mix=body.content_mix,
+        options=options,
+        status="queued",
+    )
+    db.add(batch)
+    await db.flush()
+    await db.refresh(batch)
+    await enqueue_task(db, "content_factory.plan_batch", args=[str(batch.id)], dedupe_key=f"batch:{batch.id}:plan")
+    response = _json(batch)
+    await db.commit()
+    nudge_dispatcher(queue)
+    return response
+
+
+@router.get("/batches")
+async def list_batches(project_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    stmt = select(ProductionBatch).order_by(ProductionBatch.created_at.desc()).limit(200)
+    if project_id:
+        stmt = stmt.where(ProductionBatch.project_id == project_id)
+    return [_json(row) for row in (await db.execute(stmt)).scalars().all()]
+
+
+@router.get("/batches/{batch_id}")
+async def get_batch(batch_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    batch = await db.scalar(select(ProductionBatch).where(ProductionBatch.id == batch_id))
+    if not batch:
+        raise HTTPException(404, "Production batch not found")
+    items = (await db.execute(select(ProductionBatchItem).where(ProductionBatchItem.batch_id == batch_id).order_by(ProductionBatchItem.position.asc()))).scalars().all()
+    run_ids = [row.child_run_id for row in items if row.child_run_id]
+    run_map: dict[uuid.UUID, GenerationRun] = {}
+    if run_ids:
+        runs = (await db.execute(select(GenerationRun).where(GenerationRun.id.in_(run_ids)))).scalars().all()
+        run_map = {run.id: run for run in runs}
+    payloads, counts = [], {}
+    for row in items:
+        payload = _json(row)
+        run = run_map.get(row.child_run_id) if row.child_run_id else None
+        effective_status = run.status.value if run else row.status
+        payload["run_status"] = effective_status
+        payload["content_item_id"] = str(run.content_item_id) if run and run.content_item_id else None
+        payload["quality_score"] = run.quality_score if run else None
+        counts[effective_status] = counts.get(effective_status, 0) + 1
+        payloads.append(payload)
+    return {"batch": _json(batch), "counts": counts, "items": payloads}
+
+
 @router.get("/content/{content_id}/detail")
-async def content_detail(
-    content_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def content_detail(content_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
     if not item:
         raise HTTPException(404, "Content item not found")
-
-    versions = (await db.execute(
-        select(ContentVersion).where(ContentVersion.content_item_id == content_id).order_by(ContentVersion.version.desc())
-    )).scalars().all()
-    evaluations = (await db.execute(
-        select(Evaluation).where(Evaluation.content_item_id == content_id).order_by(Evaluation.created_at.desc())
-    )).scalars().all()
-    variants = (await db.execute(
-        select(ContentVariant).where(ContentVariant.content_item_id == content_id).order_by(ContentVariant.platform.asc())
-    )).scalars().all()
-    media = (await db.execute(
-        select(MediaAsset).where(MediaAsset.content_item_id == content_id).order_by(MediaAsset.created_at.desc())
-    )).scalars().all()
-    runs = (await db.execute(
-        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
-    )).scalars().all()
+    versions = (await db.execute(select(ContentVersion).where(ContentVersion.content_item_id == content_id).order_by(ContentVersion.version.desc()))).scalars().all()
+    evaluations = (await db.execute(select(Evaluation).where(Evaluation.content_item_id == content_id).order_by(Evaluation.created_at.desc()))).scalars().all()
+    variants = (await db.execute(select(ContentVariant).where(ContentVariant.content_item_id == content_id).order_by(ContentVariant.platform.asc()))).scalars().all()
+    media = (await db.execute(select(MediaAsset).where(MediaAsset.content_item_id == content_id).order_by(MediaAsset.created_at.desc()))).scalars().all()
+    runs = (await db.execute(select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc()))).scalars().all()
+    decisions = (await db.execute(select(ReviewDecision).where(ReviewDecision.content_item_id == content_id).order_by(ReviewDecision.created_at.desc()))).scalars().all()
     return {
         "content": _json(item),
         "versions": [_json(row) for row in versions],
@@ -158,24 +221,19 @@ async def content_detail(
         "variants": [_json(row) for row in variants],
         "media": [_json(row) for row in media],
         "runs": [_json(row) for row in runs],
+        "review_decisions": [_json(row) for row in decisions],
     }
 
 
 @router.post("/content/{content_id}/approve", status_code=status.HTTP_202_ACCEPTED)
-async def approve_content(
-    content_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
-):
+async def approve_content(content_id: uuid.UUID, body: ReviewDecisionPayload | None = None, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
     if not item:
         raise HTTPException(404, "Content item not found")
     if item.status == ContentStatus.archived:
         raise HTTPException(409, "Archived content cannot be approved")
-
-    run = await db.scalar(
-        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
-    )
+    await _record_review(db, item=item, user=user, action="approve", body=body)
+    run = await db.scalar(select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc()))
     if run:
         run.status = GenerationRunStatus.running
         run.current_stage = "human_approved"
@@ -185,67 +243,45 @@ async def approve_content(
             status=GenerationStepStatus.passed,
             provider="human",
             model=None,
-            prompt_version="manual-v1",
-            input_json={"user_id": str(user.id)},
+            prompt_version="manual-v2",
+            input_json={"user_id": str(user.id), "reason_codes": body.reason_codes if body else [], "note": body.note if body else None},
             output_json={"approved": True},
         ))
     item.status = ContentStatus.adapting
+    await enqueue_task(db, "content_factory.approve_content", args=[str(item.id)], dedupe_key=f"content:{item.id}:approve:v{item.current_version}")
     await db.commit()
-    queue.send_task("content_factory.approve_content", args=[str(item.id)])
+    nudge_dispatcher(queue)
     return {"id": str(item.id), "status": "approved_for_downstream_processing"}
 
 
 @router.post("/content/{content_id}/regenerate", status_code=status.HTTP_202_ACCEPTED)
-async def regenerate_content(
-    content_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def regenerate_content(content_id: uuid.UUID, body: ReviewDecisionPayload | None = None, db: AsyncSession = Depends(get_db), user: User = Depends(get_current_user)):
     item = await db.scalar(select(ContentItem).where(ContentItem.id == content_id))
     if not item:
         raise HTTPException(404, "Content item not found")
-    latest_run = await db.scalar(
-        select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc())
-    )
-    options = dict(latest_run.options or {}) if latest_run else {
-        "use_research": True,
-        "generate_media": True,
-        "auto_export": False,
-    }
+    await _record_review(db, item=item, user=user, action="regenerate", body=body)
+    latest_run = await db.scalar(select(GenerationRun).where(GenerationRun.content_item_id == content_id).order_by(GenerationRun.created_at.desc()))
+    options = dict(latest_run.options or {}) if latest_run else {"use_research": True, "use_knowledge": True, "generate_media": True, "auto_export": False}
     options["regenerated_from_content_id"] = str(content_id)
-    run = GenerationRun(
-        project_id=item.project_id,
-        task=item.task or item.topic or item.title,
-        content_type=item.type.value,
-        platforms=item.platforms or ["telegram"],
-        options=options,
-    )
+    run = GenerationRun(project_id=item.project_id, task=item.task or item.topic or item.title, content_type=item.type.value, platforms=item.platforms or ["telegram"], options=options)
     db.add(run)
     await db.flush()
     await db.refresh(run)
+    await enqueue_task(db, "content_factory.process_run", args=[str(run.id)], dedupe_key=f"run:{run.id}:process")
     response = _json(run)
     await db.commit()
-    queue.send_task("content_factory.process_run", args=[str(run.id)])
+    nudge_dispatcher(queue)
     return response
 
 
 @router.get("/brand/{project_id}")
-async def get_brand_profile(
-    project_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def get_brand_profile(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     row = await db.scalar(select(BrandProfile).where(BrandProfile.project_id == project_id))
     return _json(row) if row else None
 
 
 @router.put("/brand/{project_id}")
-async def upsert_brand_profile(
-    project_id: uuid.UUID,
-    body: BrandProfileUpsert,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def upsert_brand_profile(project_id: uuid.UUID, body: BrandProfileUpsert, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     project = await db.scalar(select(Project).where(Project.id == project_id))
     if not project:
         raise HTTPException(404, "Project not found")
@@ -262,38 +298,20 @@ async def upsert_brand_profile(
 
 
 @router.get("/rubrics")
-async def list_rubrics(
-    project_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
-    rows = (await db.execute(
-        select(Rubric).where(Rubric.project_id == project_id, Rubric.active.is_(True)).order_by(Rubric.created_at.desc())
-    )).scalars().all()
+async def list_rubrics(project_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
+    rows = (await db.execute(select(Rubric).where(Rubric.project_id == project_id, Rubric.active.is_(True)).order_by(Rubric.created_at.desc()))).scalars().all()
     return [_json(row) for row in rows]
 
 
 @router.post("/rubrics", status_code=status.HTTP_201_CREATED)
-async def create_rubric(
-    body: RubricCreate,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def create_rubric(body: RubricCreate, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     try:
         project_id = uuid.UUID(body.project_id)
     except ValueError as exc:
         raise HTTPException(400, "Invalid project_id") from exc
-    project = await db.scalar(select(Project).where(Project.id == project_id))
-    if not project:
+    if not await db.scalar(select(Project.id).where(Project.id == project_id)):
         raise HTTPException(404, "Project not found")
-    row = Rubric(
-        project_id=project_id,
-        name=body.name,
-        description=body.description,
-        goal=body.goal,
-        content_types=body.content_types,
-        platforms=body.platforms,
-    )
+    row = Rubric(project_id=project_id, name=body.name, description=body.description, goal=body.goal, content_types=body.content_types, platforms=body.platforms)
     db.add(row)
     await db.flush()
     await db.refresh(row)
@@ -301,28 +319,21 @@ async def create_rubric(
 
 
 @router.get("/outbox")
-async def list_outbox(
-    project_id: uuid.UUID | None = None,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def list_outbox(project_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     stmt = select(ExportDelivery).order_by(ExportDelivery.created_at.desc()).limit(200)
     if project_id:
         stmt = stmt.join(ContentItem, ContentItem.id == ExportDelivery.content_item_id).where(ContentItem.project_id == project_id)
-    rows = (await db.execute(stmt)).scalars().all()
-    return [_json(row) for row in rows]
+    return [_json(row) for row in (await db.execute(stmt)).scalars().all()]
 
 
 @router.post("/outbox/{delivery_id}/send", status_code=status.HTTP_202_ACCEPTED)
-async def send_outbox_delivery(
-    delivery_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+async def send_outbox_delivery(delivery_id: uuid.UUID, db: AsyncSession = Depends(get_db), _: User = Depends(get_current_user)):
     delivery = await db.scalar(select(ExportDelivery).where(ExportDelivery.id == delivery_id))
     if not delivery:
         raise HTTPException(404, "Export delivery not found")
     if delivery.payload.get("status") != "approved":
         raise HTTPException(409, "Only approved content packages can be sent to Autoposter")
-    queue.send_task("content_factory.send_delivery", args=[str(delivery.id)])
+    await enqueue_task(db, "content_factory.send_delivery_v2", args=[str(delivery.id)], dedupe_key=f"delivery:{delivery.id}:send")
+    await db.commit()
+    nudge_dispatcher(queue)
     return {"id": str(delivery.id), "status": "queued_for_delivery"}
