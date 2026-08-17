@@ -1,4 +1,4 @@
-"""Content-item CRUD schemas used by the review workspace."""
+"""Content schemas used by the Content Factory review workspace."""
 
 from datetime import datetime
 from typing import Any
@@ -45,19 +45,10 @@ class ContentItemRead(BaseModel):
     platforms: list[str] | None = None
     visual_prompt: str | None = None
     structured_json: dict[str, Any] | None = None
+    research_sources: list[dict[str, Any]] | None = None
     quality_score: float | None = None
     current_version: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
-
-    model_config = {"from_attributes": True}
-
-
-class ContentPlanRead(BaseModel):
-    id: str
-    project_id: str
-    month: str
-    items: list | None = None
-    created_at: str | None = None
 
     model_config = {"from_attributes": True}
