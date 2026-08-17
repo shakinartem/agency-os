@@ -8,7 +8,7 @@ new production flow is verified in deployment.
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -62,8 +62,8 @@ class GenerationRun(Base, TimestampMixin):
     current_stage: Mapped[str | None] = mapped_column(String(80), nullable=True)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class GenerationStep(Base, TimestampMixin):
@@ -217,7 +217,7 @@ class PerformanceSnapshot(Base, TimestampMixin):
     external_publication_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     platform: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
     metrics: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    captured_at: Mapped[datetime] = mapped_column(nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, default=dict, nullable=True)
 
 
@@ -230,7 +230,7 @@ class TaskOutbox(Base, TimestampMixin):
     kwargs_json: Mapped[dict | None] = mapped_column(JSONB, default=dict, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="pending", nullable=False, index=True)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    available_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
-    sent_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    available_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False, index=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     dedupe_key: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
