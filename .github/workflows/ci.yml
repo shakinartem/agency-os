@@ -20,8 +20,7 @@ jobs:
           POSTGRES_USER: agency
           POSTGRES_PASSWORD: agency_secret
           POSTGRES_DB: agency_os
-        ports:
-          - 5432:5432
+        ports: ["5432:5432"]
         options: >-
           --health-cmd "pg_isready -U agency -d agency_os"
           --health-interval 5s
@@ -61,12 +60,16 @@ jobs:
           python -c "from apps.worker.tasks.batch_tasks import plan_batch; assert plan_batch.name == 'content_factory.plan_batch'"
           python -c "from apps.worker.tasks.delivery_tasks import send_delivery_v2; assert send_delivery_v2.name == 'content_factory.send_delivery_v2'"
           python -c "from apps.worker.tasks.dispatch_tasks import dispatch_task_outbox, execute_outbox_task; assert dispatch_task_outbox.name == 'content_factory.dispatch_task_outbox'; assert execute_outbox_task.name == 'content_factory.execute_outbox_task'"
-          python -c "from database.task_outbox import enqueue_task; print(enqueue_task.__name__)"
-      - name: Run API and worker tests
+      - name: Run API tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
           DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
-        run: pytest -q apps/api/tests apps/worker/tests
+        run: pytest -q apps/api/tests
+      - name: Run worker tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+        run: pytest -q apps/worker/tests
 
   web:
     name: Next.js production build
