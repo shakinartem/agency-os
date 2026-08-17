@@ -93,6 +93,12 @@ export default function BatchesPage() {
   const needsReview = detail?.items.filter((item) => item.run_status === "awaiting_review").length || 0;
   const failed = detail?.items.filter((item) => item.run_status === "failed").length || 0;
   const progress = detail?.items.length ? Math.round((completed / detail.items.length) * 100) : 0;
+  const batchStats = [
+    { label: "Готово", value: completed, icon: <CheckCircle2 className="h-4 w-4 text-muted-foreground" /> },
+    { label: "Review", value: needsReview, icon: <TriangleAlert className="h-4 w-4 text-muted-foreground" /> },
+    { label: "Ошибки", value: failed, icon: <TriangleAlert className="h-4 w-4 text-muted-foreground" /> },
+    { label: "Прогресс", value: `${progress}%`, icon: <Clock3 className="h-4 w-4 text-muted-foreground" /> },
+  ];
 
   const togglePlatform = (platform: string) => {
     setPlatforms((prev) => prev.includes(platform) ? prev.filter((item) => item !== platform) : [...prev, platform]);
@@ -179,13 +185,11 @@ export default function BatchesPage() {
             {detail && (
               <div className="space-y-4">
                 <div className="grid gap-3 sm:grid-cols-4">
-                  {[
-                    ["Готово", completed, CheckCircle2],
-                    ["Review", needsReview, TriangleAlert],
-                    ["Ошибки", failed, TriangleAlert],
-                    ["Прогресс", `${progress}%`, Clock3],
-                  ].map(([label, value, Icon]) => (
-                    <div key={String(label)} className="rounded-xl border p-3"><div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{String(label)}</span><Icon className="h-4 w-4 text-muted-foreground" /></div><p className="mt-2 text-2xl font-bold">{String(value)}</p></div>
+                  {batchStats.map((stat) => (
+                    <div key={stat.label} className="rounded-xl border p-3">
+                      <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{stat.label}</span>{stat.icon}</div>
+                      <p className="mt-2 text-2xl font-bold">{stat.value}</p>
+                    </div>
                   ))}
                 </div>
                 {detail.batch.strategy_summary && <div className="rounded-xl bg-muted/40 p-4 text-sm leading-6"><p className="mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground">Strategy</p>{detail.batch.strategy_summary}</div>}
