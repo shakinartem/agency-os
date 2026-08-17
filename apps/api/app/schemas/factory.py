@@ -53,6 +53,14 @@ class RubricCreate(BaseModel):
     platforms: list[str] = Field(default_factory=list)
 
 
+class RubricGenerateRequest(BaseModel):
+    project_id: str
+    goal: str = Field(default="Build a balanced reusable content system", min_length=3)
+    platforms: list[str] = Field(default_factory=lambda: ["telegram"])
+    count: int = Field(default=8, ge=3, le=20)
+    use_research: bool = True
+
+
 class ExportRead(BaseModel):
     id: str
     content_item_id: str
