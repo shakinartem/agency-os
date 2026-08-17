@@ -24,6 +24,12 @@ class ApiClient {
     return h;
   }
 
+  private authHeaders(): Record<string, string> {
+    const h: Record<string, string> = {};
+    if (this.token) h["Authorization"] = `Bearer ${this.token}`;
+    return h;
+  }
+
   async get<T>(path: string): Promise<T> {
     const res = await fetch(`${API_BASE}${path}`, { headers: this.headers() });
     if (!res.ok) throw new ApiError(res.status, await res.text());
@@ -36,6 +42,17 @@ class ApiClient {
       method: "POST",
       headers: this.headers(),
       body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text());
+    if (res.status === 204) return undefined as T;
+    return res.json();
+  }
+
+  async postForm<T>(path: string, body: FormData): Promise<T> {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: this.authHeaders(),
+      body,
     });
     if (!res.ok) throw new ApiError(res.status, await res.text());
     if (res.status === 204) return undefined as T;
