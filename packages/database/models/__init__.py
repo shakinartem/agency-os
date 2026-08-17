@@ -13,6 +13,17 @@ from .report_snapshot import ReportSnapshot
 from .integration_config import IntegrationConfig
 from .integration_log import IntegrationLog
 from .system_setting import SystemSetting
+from .content_factory import (
+    BrandProfile,
+    Rubric,
+    GenerationRun,
+    GenerationStep,
+    ContentVersion,
+    ContentVariant,
+    Evaluation,
+    MediaAsset,
+    ExportDelivery,
+)
 
 __all__ = [
     "User",
@@ -28,4 +39,13 @@ __all__ = [
     "IntegrationConfig",
     "IntegrationLog",
     "SystemSetting",
+    "BrandProfile",
+    "Rubric",
+    "GenerationRun",
+    "GenerationStep",
+    "ContentVersion",
+    "ContentVariant",
+    "Evaluation",
+    "MediaAsset",
+    "ExportDelivery",
 ]
