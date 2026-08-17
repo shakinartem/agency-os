@@ -11,10 +11,11 @@ from celery import shared_task
 from sqlalchemy import select, update
 
 from database.base import get_async_session_maker
-from database.enums import ContentStatus, ContentType, GenerationRunStatus
+from database.enums import ContentStatus, ContentType, GenerationRunStatus, GenerationStepStatus
 from database.models import BrandProfile, ContentItem, ContentVersion, GenerationRun, Rubric
 
 from .factory_worker import _brand_context, _complete_step, _stage
+from .knowledge import knowledge_refs, retrieve_knowledge
 from .providers import chat_json, research_web
 
 RUBRIC_QUALITY_THRESHOLD = 0.82
@@ -37,23 +38,46 @@ async def _generate_rubrics(run_id: str) -> None:
             count = min(max(int((run.options or {}).get("rubric_count", 8)), 3), 20)
             goal = (run.options or {}).get("strategy_goal") or run.task
 
+            knowledge_step = await _stage(
+                session,
+                run,
+                "rubric_knowledge_retrieve",
+                {"query": goal},
+                provider="postgres-fts",
+                model=None,
+            )
+            knowledge_chunks = await retrieve_knowledge(session, run.project_id, goal)
+            internal_refs = knowledge_refs(knowledge_chunks)
+            await _complete_step(
+                session,
+                knowledge_step,
+                {"count": len(knowledge_chunks), "refs": internal_refs},
+                status=GenerationStepStatus.passed if knowledge_chunks else GenerationStepStatus.skipped,
+            )
+
             sources = []
             if (run.options or {}).get("use_research", True):
                 research_step = await _stage(session, run, "rubric_research", {"query": goal}, provider="tavily", model=None)
                 research = await research_web(goal)
                 sources = research.get("sources") or []
-                from database.enums import GenerationStepStatus
                 research_status = GenerationStepStatus.passed if research.get("status") == "passed" else GenerationStepStatus.skipped
                 await _complete_step(session, research_step, research, status=research_status)
 
-            generation_step = await _stage(session, run, "rubric_generate", {"goal": goal, "count": count, "platforms": run.platforms})
+            generation_step = await _stage(session, run, "rubric_generate", {
+                "goal": goal,
+                "count": count,
+                "platforms": run.platforms,
+                "knowledge_chunks_count": len(knowledge_chunks),
+            })
             strategy = await chat_json(
                 "You are a senior content strategist. Build reusable content systems, not random topic lists. Return JSON only.",
                 f"""Create {count} distinct reusable content rubrics for this brand.
 Each rubric must have a clear job in the audience journey and generate many future topics without overlapping the others.
+Use private Project Knowledge to understand the real business/products/customer language, but never expose internal document names or private passages in public rubric text.
 Strategy goal: {goal}
 Platforms: {run.platforms}
 Brand: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Research context: {json.dumps(sources, ensure_ascii=False)}
 Return exactly:
 {{
@@ -78,8 +102,9 @@ Return exactly:
             critic_step = await _stage(session, run, "rubric_critic", {"rubrics": strategy.get("rubrics") or []})
             critic = await chat_json(
                 "You are a skeptical head of content strategy. Penalize overlap, generic categories and strategy theater. Return JSON only.",
-                f"""Review this rubric system against the brand and goal.
+                f"""Review this rubric system against the real brand, private first-party knowledge and strategy goal.
 Brand: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Goal: {goal}
 Rubrics: {json.dumps(strategy, ensure_ascii=False)}
 Return exactly {{"overall":0.0,"brand_fit":0.0,"coverage":0.0,"distinctness":0.0,"actionability":0.0,"notes":[]}}.""",
@@ -94,6 +119,7 @@ Return exactly {{"overall":0.0,"brand_fit":0.0,"coverage":0.0,"distinctness":0.0
                     "You are a senior content strategist revising a weak rubric system. Return JSON only.",
                     f"""Fix the strategy using the critic notes. Remove overlapping/generic rubrics and improve audience-journey coverage.
 Brand: {json.dumps(brand, ensure_ascii=False)}
+Project Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}
 Goal: {goal}
 Current strategy: {json.dumps(strategy, ensure_ascii=False)}
 Critic: {json.dumps(critic, ensure_ascii=False)}
@@ -104,7 +130,7 @@ Keep the same JSON schema and target {count} rubrics.""",
                 recheck_step = await _stage(session, run, "rubric_recheck")
                 critic = await chat_json(
                     "You are a skeptical head of content strategy. Return JSON only.",
-                    f"""Re-score the revised strategy. Brand: {json.dumps(brand, ensure_ascii=False)}\nGoal: {goal}\nStrategy: {json.dumps(strategy, ensure_ascii=False)}\nReturn {{"overall":0.0,"brand_fit":0.0,"coverage":0.0,"distinctness":0.0,"actionability":0.0,"notes":[]}}.""",
+                    f"""Re-score the revised strategy. Brand: {json.dumps(brand, ensure_ascii=False)}\nProject Knowledge: {json.dumps(knowledge_chunks, ensure_ascii=False)}\nGoal: {goal}\nStrategy: {json.dumps(strategy, ensure_ascii=False)}\nReturn {{"overall":0.0,"brand_fit":0.0,"coverage":0.0,"distinctness":0.0,"actionability":0.0,"notes":[]}}.""",
                 )
                 await _complete_step(session, recheck_step, critic)
                 overall = float(critic.get("overall", 0))
@@ -123,6 +149,7 @@ Keep the same JSON schema and target {count} rubrics.""",
                 platforms=run.platforms,
                 structured_json={**strategy, "critic": critic},
                 research_sources=sources,
+                knowledge_refs=internal_refs,
                 quality_score=overall,
                 current_version=1,
             )
