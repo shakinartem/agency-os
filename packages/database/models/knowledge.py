@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import Computed, ForeignKey, Integer, String, Text
+from sqlalchemy import Computed, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,6 +12,9 @@ from ..mixins import TimestampMixin
 
 class KnowledgeDocument(Base, TimestampMixin):
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint("project_id", "checksum", name="uq_knowledge_document_project_checksum"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
@@ -30,6 +33,9 @@ class KnowledgeDocument(Base, TimestampMixin):
 
 class KnowledgeChunk(Base, TimestampMixin):
     __tablename__ = "knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "position", name="uq_knowledge_chunk_document_position"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
