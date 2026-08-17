@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
 import { useProject } from "@/context/ProjectContext";
-import { Check, ExternalLink, FileText, Gauge, Image as ImageIcon, Layers3, RefreshCcw, Search } from "lucide-react";
+import { BookOpen, Check, ExternalLink, FileText, Gauge, Image as ImageIcon, Layers3, RefreshCcw, Search } from "lucide-react";
 
 interface ContentItem {
   id: string;
@@ -19,6 +19,7 @@ interface ContentItem {
   topic?: string;
   platforms?: string[];
   research_sources?: Array<{ id?: string; title?: string; url?: string; score?: number }>;
+  knowledge_refs?: Array<{ chunk_id?: string; document_id?: string; document_name?: string; position?: number; rank?: number; excerpt?: string }>;
   quality_score?: number;
   current_version?: number;
   created_at?: string;
@@ -77,7 +78,7 @@ export default function ContentPage() {
       <div>
         <div className="flex items-center gap-2 text-sm font-medium text-primary"><FileText className="h-4 w-4" /> Review workspace</div>
         <h1 className="mt-1 text-3xl font-bold tracking-tight">Content</h1>
-        <p className="mt-2 text-sm text-muted-foreground">Канонический материал, версии, источники, QA, платформенные варианты и visual assets в одном месте. Ручные правки сохраняются как новая версия, а не стирают AI trace.</p>
+        <p className="mt-2 text-sm text-muted-foreground">Канонический материал, версии, first-party knowledge, внешние источники, QA, платформенные варианты и visual assets в одном месте. Ручные правки сохраняются как новая версия, а не стирают AI trace.</p>
       </div>
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.85fr)]">
@@ -100,7 +101,8 @@ export default function ContentPage() {
                   <div className="mt-4 flex flex-wrap gap-4 border-t pt-3 text-xs text-muted-foreground">
                     <span className="flex items-center gap-1"><Gauge className="h-3.5 w-3.5" /> score {item.quality_score != null ? Math.round(item.quality_score * 100) : "—"}</span>
                     <span className="flex items-center gap-1"><Layers3 className="h-3.5 w-3.5" /> v{item.current_version || 0}</span>
-                    <span className="flex items-center gap-1"><Search className="h-3.5 w-3.5" /> {item.research_sources?.length || 0} sources</span>
+                    <span className="flex items-center gap-1"><BookOpen className="h-3.5 w-3.5" /> {item.knowledge_refs?.length || 0} knowledge</span>
+                    <span className="flex items-center gap-1"><Search className="h-3.5 w-3.5" /> {item.research_sources?.length || 0} web sources</span>
                     {item.topic && <span className="truncate">{item.topic}</span>}
                   </div>
                 </CardContent>
@@ -164,7 +166,24 @@ export default function ContentPage() {
               </Card>
 
               <Card>
-                <CardHeader><CardTitle className="text-base">Sources</CardTitle></CardHeader>
+                <CardHeader><CardTitle className="flex items-center gap-2 text-base"><BookOpen className="h-4 w-4" /> Internal Knowledge</CardTitle></CardHeader>
+                <CardContent className="space-y-2">
+                  {(selected.knowledge_refs || []).map((ref, index) => (
+                    <div key={`${ref.chunk_id}-${index}`} className="rounded-lg border p-3 text-xs">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="truncate font-medium">{ref.document_name || "Knowledge document"}</p>
+                        <span className="shrink-0 text-muted-foreground">rank {ref.rank != null ? ref.rank.toFixed(3) : "—"}</span>
+                      </div>
+                      {ref.excerpt && <p className="mt-2 line-clamp-4 whitespace-pre-wrap leading-5 text-muted-foreground">{ref.excerpt}</p>}
+                    </div>
+                  ))}
+                  {(selected.knowledge_refs || []).length === 0 && <p className="text-sm text-muted-foreground">No project knowledge chunks were retrieved for this run.</p>}
+                  <p className="pt-1 text-[11px] text-muted-foreground">Private knowledge lineage is visible here for audit, but is intentionally excluded from the Autoposter package.</p>
+                </CardContent>
+              </Card>
+
+              <Card>
+                <CardHeader><CardTitle className="text-base">External Sources</CardTitle></CardHeader>
                 <CardContent className="space-y-2">
                   {(selected.research_sources || []).map((source, index) => (
                     <a key={`${source.url}-${index}`} href={source.url} target="_blank" rel="noreferrer" className="flex items-start justify-between gap-3 rounded-lg border p-3 text-xs hover:bg-muted/50">
