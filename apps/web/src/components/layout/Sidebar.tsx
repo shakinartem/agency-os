@@ -3,15 +3,17 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
-import { BookOpen, BrainCircuit, FileText, Layers3, LayoutDashboard, Send, Settings, UserCog } from "lucide-react";
+import { BarChart3, BookOpen, Boxes, BrainCircuit, FileText, Layers3, LayoutDashboard, Send, Settings, UserCog } from "lucide-react";
 
 const navItems = [
   { label: "Factory", href: "/dashboard", icon: LayoutDashboard },
+  { label: "Batches", href: "/batches", icon: Boxes },
   { label: "Brand Brain", href: "/brand", icon: BrainCircuit },
   { label: "Knowledge Base", href: "/knowledge", icon: BookOpen },
   { label: "Strategy & Rubrics", href: "/rubrics", icon: Layers3 },
   { label: "Content", href: "/content", icon: FileText },
   { label: "Autoposter Outbox", href: "/publishing", icon: Send },
+  { label: "Performance", href: "/performance", icon: BarChart3 },
   { label: "Users", href: "/users", icon: UserCog },
   { label: "Settings", href: "/settings", icon: Settings },
 ];
