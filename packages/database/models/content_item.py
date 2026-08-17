@@ -38,6 +38,8 @@ class ContentItem(Base, TimestampMixin):
     visual_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     structured_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=dict)
     research_sources: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    # Internal lineage only: these references must not be exported to public platform payloads.
+    knowledge_refs: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
     quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     current_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
