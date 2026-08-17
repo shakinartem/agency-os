@@ -4,6 +4,7 @@ Revises: 0003_content_factory_core
 """
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
@@ -16,7 +17,7 @@ depends_on: str | None = None
 def upgrade() -> None:
     op.add_column(
         "content_items",
-        postgresql.JSONB(astext_type=None).with_variant(postgresql.JSONB(), "postgresql"),
+        sa.Column("research_sources", postgresql.JSONB(), nullable=True),
     )
 
 
