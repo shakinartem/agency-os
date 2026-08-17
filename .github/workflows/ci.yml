@@ -62,6 +62,7 @@ jobs:
           python -c "from app.main import app as api_app; print(api_app.title)"
           python -c "from apps.worker.tasks.factory_worker import app as worker_app; print(worker_app.main)"
           python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'; print(approve_content.name)"
+          python -c "from apps.worker.tasks.strategy_tasks import generate_rubrics; assert generate_rubrics.name == 'content_factory.generate_rubrics'; print(generate_rubrics.name)"
 
       - name: Run worker contract tests
         env:
