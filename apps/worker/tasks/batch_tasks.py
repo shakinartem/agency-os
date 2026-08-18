@@ -89,6 +89,7 @@ async def _plan_batch(batch_id: str) -> None:
             )
             learning_snapshot = _compact_learning_snapshot(performance)
             batch.options = {**(batch.options or {}), "performance_learning_snapshot": learning_snapshot}
+            exploration_floor = float(performance.get("exploration_share") or 0.0) if performance.get("status") == "learning" else 0.0
 
             step = await _stage(session, planner_run, "batch_generate_plan", {
                 "objective": batch.objective,
@@ -98,6 +99,7 @@ async def _plan_batch(batch_id: str) -> None:
                 "performance_status": performance.get("status"),
                 "performance_publications": performance.get("publications", 0),
                 "performance_primary_metric": performance.get("primary_metric"),
+                "exploration_floor": exploration_floor,
             })
             plan = await chat_json(
                 "You are a senior content portfolio strategist. Return JSON only. Build a production series, not a random list.",
@@ -114,17 +116,17 @@ async def _plan_batch(batch_id: str) -> None:
             )
             await _complete_step(session, step, plan)
             items = plan.get("items") or []
-            errors = validate_batch_plan(items, content_mix, allowed_rubric_ids)
+            errors = validate_batch_plan(items, content_mix, allowed_rubric_ids, min_exploration_share=exploration_floor)
 
             if errors:
-                revise_step = await _stage(session, planner_run, "batch_revise_plan", {"errors": errors})
+                revise_step = await _stage(session, planner_run, "batch_revise_plan", {"errors": errors, "exploration_floor": exploration_floor})
                 plan = await chat_json(
                     "You are revising a content portfolio plan that failed deterministic validation. Return JSON only.",
                     revision_prompt(objective=batch.objective, content_mix=content_mix, rubrics=rubrics, errors=errors, plan=plan),
                 )
                 await _complete_step(session, revise_step, plan)
                 items = plan.get("items") or []
-                errors = validate_batch_plan(items, content_mix, allowed_rubric_ids)
+                errors = validate_batch_plan(items, content_mix, allowed_rubric_ids, min_exploration_share=exploration_floor)
 
             if errors:
                 batch.status = "review"

@@ -23,3 +23,25 @@ def test_batch_plan_rejects_wrong_mix_and_unknown_rubric():
     assert any("content_type post" in error for error in errors)
     assert any("content_type article" in error for error in errors)
     assert any("unknown rubric_id" in error for error in errors)
+
+
+def test_performance_informed_plan_enforces_exploration_floor():
+    rubric = "11111111-1111-1111-1111-111111111111"
+    items = [
+        {"content_type": "post", "topic": f"Topic {index}", "rubric_id": rubric, "learning_mode": "exploit"}
+        for index in range(4)
+    ]
+    errors = validate_batch_plan(items, {"post": 4}, {rubric}, min_exploration_share=0.25)
+    assert any("exploration floor" in error for error in errors)
+
+    items[-1]["learning_mode"] = "explore"
+    assert validate_batch_plan(items, {"post": 4}, {rubric}, min_exploration_share=0.25) == []
+
+
+def test_exploration_policy_requires_explicit_learning_mode():
+    items = [
+        {"content_type": "post", "topic": "One", "rubric_id": None, "learning_mode": "explore"},
+        {"content_type": "post", "topic": "Two", "rubric_id": None},
+    ]
+    errors = validate_batch_plan(items, {"post": 2}, set(), min_exploration_share=0.25)
+    assert any("learning_mode" in error for error in errors)
