@@ -28,3 +28,40 @@ def test_unknown_candidate_price_stays_unknown(monkeypatch):
     )
     assert meta["cost_rates_configured"] is False
     assert meta["estimated_cost_usd"] is None
+
+
+def test_shadow_candidate_prefers_least_sampled_non_default():
+    decision = {
+        "evidence": {
+            "candidates": [
+                {"model": "default", "samples": 100, "live_samples": 100},
+                {"model": "candidate-a", "samples": 8, "live_samples": 0},
+                {"model": "candidate-b", "samples": 2, "live_samples": 0},
+            ]
+        }
+    }
+    assert model_router_runtime._shadow_candidate(decision, "default") == "candidate-b"
+
+
+def test_shadow_sampling_is_safe_and_retry_stable(monkeypatch):
+    monkeypatch.setattr(model_router_runtime, "deterministic_fraction", lambda *_: 0.01)
+    context = {
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "stage_family": "draft",
+        "already_sampled": False,
+        "decision": {"mode": "shadow", "shadow_sample_rate": 0.05},
+    }
+    assert model_router_runtime._should_shadow_trial(context, "candidate") is True
+    context["already_sampled"] = True
+    assert model_router_runtime._should_shadow_trial(context, "candidate") is False
+
+
+def test_active_mode_never_runs_offline_shadow_trial(monkeypatch):
+    monkeypatch.setattr(model_router_runtime, "deterministic_fraction", lambda *_: 0.0)
+    context = {
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "stage_family": "draft",
+        "already_sampled": False,
+        "decision": {"mode": "active", "shadow_sample_rate": 0.50},
+    }
+    assert model_router_runtime._should_shadow_trial(context, "candidate") is False
