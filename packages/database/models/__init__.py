@@ -32,6 +32,7 @@ from .content_factory import (
     TaskOutbox,
 )
 from .knowledge import KnowledgeDocument, KnowledgeChunk
+from .model_router_snapshot import ModelRouterSnapshot
 
 
 def _strip_internal_provider_meta(value):
@@ -51,41 +52,16 @@ def _sanitize_content_json(_target, value, _oldvalue, _initiator):
     return _strip_internal_provider_meta(value)
 
 
-# Provider adapters attach `_provider_meta` to their transient result so GenerationStep
-# can persist an auditable trace. ContentItem/ContentVersion are product data, so strip
-# that internal envelope at the ORM boundary even if a future pipeline stage forgets to.
 event.listen(ContentItem.structured_json, "set", _sanitize_content_json, retval=True)
 event.listen(ContentVersion.structured_json, "set", _sanitize_content_json, retval=True)
 
 
 __all__ = [
-    "User",
-    "Project",
-    "Lead",
-    "LeadEvent",
-    "Conversation",
-    "ConversationMessage",
-    "ContentItem",
-    "ContentPlan",
-    "Publication",
-    "ReportSnapshot",
-    "IntegrationConfig",
-    "IntegrationLog",
-    "SystemSetting",
-    "BrandProfile",
-    "Rubric",
-    "GenerationRun",
-    "GenerationStep",
-    "ContentVersion",
-    "ContentVariant",
-    "Evaluation",
-    "MediaAsset",
-    "ExportDelivery",
-    "ProductionBatch",
-    "ProductionBatchItem",
-    "ReviewDecision",
-    "PerformanceSnapshot",
-    "TaskOutbox",
-    "KnowledgeDocument",
-    "KnowledgeChunk",
+    "User", "Project", "Lead", "LeadEvent", "Conversation", "ConversationMessage",
+    "ContentItem", "ContentPlan", "Publication", "ReportSnapshot", "IntegrationConfig",
+    "IntegrationLog", "SystemSetting", "BrandProfile", "Rubric", "GenerationRun",
+    "GenerationStep", "ContentVersion", "ContentVariant", "Evaluation", "MediaAsset",
+    "ExportDelivery", "ProductionBatch", "ProductionBatchItem", "ReviewDecision",
+    "PerformanceSnapshot", "TaskOutbox", "KnowledgeDocument", "KnowledgeChunk",
+    "ModelRouterSnapshot",
 ]

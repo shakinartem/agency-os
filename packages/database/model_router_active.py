@@ -1,29 +1,17 @@
-"""Traffic policy for evidence-aware Model Router.
-
-A candidate may collect shadow evidence freely, but active live exploration is restricted to
-models that already cleared the total-sample and quality gates. Full routing additionally
-requires the live and, for content-producing stages, downstream-outcome gates.
-"""
+"""Traffic policy for cached evidence-aware Model Router."""
 from __future__ import annotations
 
 from typing import Any
 
 from .model_router import choose_from_stage_report, router_mode, stage_family
-from .model_router_outcomes import build_model_router_report
+from .model_router_cache import get_cached_model_router_report
 
 
 async def choose_model_for_run_stage(session, run, stage: str, *, default_model: str) -> dict[str, Any]:
     family = stage_family(stage)
     mode = router_mode()
     if family is None or mode == "off":
-        return choose_from_stage_report(
-            {},
-            run_id=run.id,
-            stage=stage,
-            default_model=default_model,
-            mode=mode,
-            exploration_rate=0.0,
-        )
+        return choose_from_stage_report({}, run_id=run.id, stage=stage, default_model=default_model, mode=mode, exploration_rate=0.0)
 
     options = dict(run.options or {})
     decisions = dict(options.get("_model_router_decisions") or {})
@@ -33,7 +21,12 @@ async def choose_model_for_run_stage(session, run, stage: str, *, default_model:
 
     report = options.get("_model_router_report")
     if not isinstance(report, dict) or report.get("default_model") != default_model:
-        report = await build_model_router_report(session, run.project_id, default_model=default_model)
+        report = await get_cached_model_router_report(
+            session,
+            run.project_id,
+            default_model=default_model,
+            schedule_refresh=True,
+        )
         options["_model_router_report"] = report
 
     stage_report = dict((report.get("stages") or {}).get(family) or {})
@@ -41,9 +34,6 @@ async def choose_model_for_run_stage(session, run, stage: str, *, default_model:
     if mode == "shadow":
         stage_report["recommended_model"] = stage_report.get("shadow_recommended_model") or default_model
     elif mode == "active":
-        # Controlled live exploration is allowed only after the candidate first clears
-        # the total-sample + quality gate. Full routing is stricter and is represented by
-        # stage_report.routing_ready / production_eligible after outcome gating.
         stage_report["candidates"] = [
             row for row in all_candidates
             if str(row.get("model") or "") == default_model or bool(row.get("eligible"))
@@ -58,6 +48,7 @@ async def choose_model_for_run_stage(session, run, stage: str, *, default_model:
         exploration_rate=float(report.get("exploration_rate") or 0.0),
     )
     decision["shadow_sample_rate"] = float(report.get("shadow_sample_rate") or 0.0)
+    decision["cache"] = report.get("cache") or {}
     decision["evidence"] = {
         "minimum_samples_per_model": report.get("minimum_samples_per_model"),
         "minimum_live_samples": report.get("minimum_live_samples"),

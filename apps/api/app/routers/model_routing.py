@@ -1,9 +1,4 @@
-"""Read-only Model Router diagnostics.
-
-Routing policy is intentionally configured through deployment environment variables.
-This endpoint exposes evidence and recommendations; it does not let the UI silently turn
-shadow mode into active traffic.
-"""
+"""Read-only cached Model Router diagnostics."""
 from __future__ import annotations
 
 import os
@@ -12,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.model_router_outcomes import build_model_router_report
+from database.model_router_cache import get_cached_model_router_report
 from database.models import User
 
 from ..database import get_db
@@ -28,5 +23,10 @@ async def model_routing_report(
     _: User = Depends(get_current_user),
 ):
     default_model = os.getenv("LLM_MODEL", "gpt-5.6")
-    report = await build_model_router_report(db, project_id, default_model=default_model)
+    report = await get_cached_model_router_report(
+        db,
+        project_id,
+        default_model=default_model,
+        schedule_refresh=True,
+    )
     return {"project_id": str(project_id), **report}
