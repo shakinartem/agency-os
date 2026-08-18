@@ -1,8 +1,8 @@
 """Stale-while-revalidate read path for Model Router.
 
-Routing decisions must never scan the whole project history synchronously. Raw evidence is
-aggregated by a background task into ModelRouterSnapshot. A missing/stale snapshot schedules
-a durable refresh and returns the last safe snapshot (or a default-only warming report).
+Routing decisions never scan project history synchronously. Raw evidence is aggregated by a
+background task into ModelRouterSnapshot. Snapshot compatibility includes default model,
+candidate set and prompt cohort, so a prompt-version deployment cannot reuse stale evidence.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .model_router import ROUTED_STAGE_FAMILIES, configured_candidates, router_mode
 from .model_router_outcomes import OUTCOME_GATED_STAGE_FAMILIES
+from .model_router_prompt import current_content_prompt_version
 from .models import ModelRouterSnapshot
 from .task_outbox import enqueue_task
 
@@ -71,6 +72,7 @@ def empty_model_router_report(default_model: str) -> dict[str, Any]:
     quality_floor = min(1.0, max(0.0, float(os.getenv("MODEL_ROUTER_QUALITY_FLOOR", "0.84"))))
     shadow_rate = min(0.5, max(0.0, float(os.getenv("MODEL_ROUTER_SHADOW_SAMPLE_RATE", "0.05"))))
     explore_rate = min(0.5, max(0.0, float(os.getenv("MODEL_ROUTER_EXPLORATION_RATE", "0.10"))))
+    prompt_version = current_content_prompt_version()
     stages: dict[str, Any] = {}
     for family in ROUTED_STAGE_FAMILIES:
         rows = [_empty_candidate(model, default_model) for model in candidates]
@@ -89,6 +91,7 @@ def empty_model_router_report(default_model: str) -> dict[str, Any]:
         "mode": router_mode(),
         "default_model": default_model,
         "configured_candidates": candidates,
+        "evidence_prompt_version": prompt_version,
         "minimum_samples_per_model": min_samples,
         "minimum_live_samples": min_live,
         "minimum_downstream_samples": min_downstream,
@@ -102,25 +105,33 @@ def empty_model_router_report(default_model: str) -> dict[str, Any]:
     }
 
 
+def _snapshot_config_matches(snapshot: ModelRouterSnapshot | None, default_model: str) -> bool:
+    if snapshot is None or snapshot.default_model != default_model:
+        return False
+    payload = snapshot.payload or {}
+    return (
+        list(payload.get("configured_candidates") or []) == configured_candidates(default_model)
+        and payload.get("evidence_prompt_version") == current_content_prompt_version()
+    )
+
+
 def snapshot_is_fresh(snapshot: ModelRouterSnapshot | None, default_model: str) -> bool:
-    if snapshot is None or snapshot.status != "ready" or snapshot.default_model != default_model:
+    if snapshot is None or snapshot.status != "ready" or not _snapshot_config_matches(snapshot, default_model):
         return False
     refreshed_at = _aware(snapshot.refreshed_at)
     if refreshed_at is None:
         return False
-    if (_now() - refreshed_at).total_seconds() > snapshot_ttl_seconds():
-        return False
-    payload = snapshot.payload or {}
-    return list(payload.get("configured_candidates") or []) == configured_candidates(default_model)
+    return (_now() - refreshed_at).total_seconds() <= snapshot_ttl_seconds()
 
 
 async def schedule_model_router_refresh(db: AsyncSession, project_id: uuid.UUID) -> None:
     bucket = int(time.time()) // refresh_dedupe_seconds()
+    prompt_version = current_content_prompt_version()
     await enqueue_task(
         db,
         "content_factory.refresh_model_router_snapshot",
         args=[str(project_id)],
-        dedupe_key=f"model-router-refresh:{project_id}:{bucket}",
+        dedupe_key=f"model-router-refresh:{project_id}:{prompt_version}:{bucket}",
     )
 
 
@@ -154,13 +165,7 @@ async def store_model_router_snapshot(
         error=None,
     ).on_conflict_do_update(
         index_elements=[ModelRouterSnapshot.project_id],
-        set_={
-            "default_model": default_model,
-            "status": "ready",
-            "payload": payload,
-            "refreshed_at": now,
-            "error": None,
-        },
+        set_={"default_model": default_model, "status": "ready", "payload": payload, "refreshed_at": now, "error": None},
     )
     await db.execute(stmt)
     await db.flush()
@@ -195,11 +200,7 @@ async def get_cached_model_router_report(
 ) -> dict[str, Any]:
     snapshot = await db.get(ModelRouterSnapshot, project_id)
     fresh = snapshot_is_fresh(snapshot, default_model)
-    config_matches = bool(
-        snapshot
-        and snapshot.default_model == default_model
-        and list((snapshot.payload or {}).get("configured_candidates") or []) == configured_candidates(default_model)
-    )
+    config_matches = _snapshot_config_matches(snapshot, default_model)
     if fresh:
         report = dict(snapshot.payload or {})
         state = "ready"
@@ -219,5 +220,6 @@ async def get_cached_model_router_report(
         "ttl_seconds": snapshot_ttl_seconds(),
         "refreshed_at": _aware(snapshot.refreshed_at).isoformat() if snapshot and snapshot.refreshed_at else None,
         "last_error": snapshot.error if snapshot else None,
+        "prompt_version": current_content_prompt_version(),
     }
     return report
