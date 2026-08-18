@@ -1,7 +1,8 @@
 """External provider adapters for Content Factory workers.
 
 All integrations fail explicitly: a missing provider configuration returns a skipped result
-rather than fabricated research/media success.
+rather than fabricated research/media success. LLM calls also preserve provider usage and
+latency metadata so generation economics can be audited without hard-coding vendor prices.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import base64
 import json
 import os
 import re
+import time
 import uuid
 from typing import Any
 
@@ -20,6 +22,8 @@ import httpx
 LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
 LLM_API_KEY = os.getenv("LLM_API_KEY")
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5.6")
+LLM_INPUT_COST_PER_1M_USD = float(os.getenv("LLM_INPUT_COST_PER_1M_USD", "0"))
+LLM_OUTPUT_COST_PER_1M_USD = float(os.getenv("LLM_OUTPUT_COST_PER_1M_USD", "0"))
 
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_API_URL = os.getenv("TAVILY_API_URL", "https://api.tavily.com/search")
@@ -59,6 +63,36 @@ def parse_json(text: str) -> dict[str, Any]:
     return {"body": text}
 
 
+def _provider_usage_meta(data: dict[str, Any], latency_ms: int) -> dict[str, Any]:
+    usage = data.get("usage") or {}
+    input_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
+    output_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+    total_tokens = usage.get("total_tokens")
+    if total_tokens is None and isinstance(input_tokens, (int, float)) and isinstance(output_tokens, (int, float)):
+        total_tokens = input_tokens + output_tokens
+
+    estimated_cost = None
+    if isinstance(input_tokens, (int, float)) and isinstance(output_tokens, (int, float)) and (
+        LLM_INPUT_COST_PER_1M_USD > 0 or LLM_OUTPUT_COST_PER_1M_USD > 0
+    ):
+        estimated_cost = (
+            float(input_tokens) / 1_000_000 * LLM_INPUT_COST_PER_1M_USD
+            + float(output_tokens) / 1_000_000 * LLM_OUTPUT_COST_PER_1M_USD
+        )
+
+    return {
+        "provider": "openai-compatible",
+        "model": data.get("model") or LLM_MODEL,
+        "request_id": data.get("id"),
+        "input_tokens": int(input_tokens) if isinstance(input_tokens, (int, float)) else None,
+        "output_tokens": int(output_tokens) if isinstance(output_tokens, (int, float)) else None,
+        "total_tokens": int(total_tokens) if isinstance(total_tokens, (int, float)) else None,
+        "latency_ms": latency_ms,
+        "estimated_cost_usd": round(estimated_cost, 8) if estimated_cost is not None else None,
+        "cost_rates_configured": LLM_INPUT_COST_PER_1M_USD > 0 or LLM_OUTPUT_COST_PER_1M_USD > 0,
+    }
+
+
 async def chat_json(system: str, prompt: str) -> dict[str, Any]:
     if not LLM_API_KEY:
         raise RuntimeError("LLM_API_KEY is not configured")
@@ -71,11 +105,15 @@ async def chat_json(system: str, prompt: str) -> dict[str, Any]:
         ],
         "response_format": {"type": "json_object"},
     }
+    started = time.perf_counter()
     async with httpx.AsyncClient(timeout=180) as client:
         response = await client.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
-    return parse_json(data["choices"][0]["message"]["content"])
+    latency_ms = max(0, round((time.perf_counter() - started) * 1000))
+    result = parse_json(data["choices"][0]["message"]["content"])
+    result["_provider_meta"] = _provider_usage_meta(data, latency_ms)
+    return result
 
 
 async def research_web(query: str) -> dict[str, Any]:
@@ -91,10 +129,12 @@ async def research_web(query: str) -> dict[str, Any]:
         "include_answer": False,
         "include_raw_content": False,
     }
+    started = time.perf_counter()
     async with httpx.AsyncClient(timeout=90) as client:
         response = await client.post(TAVILY_API_URL, headers=headers, json=payload)
         response.raise_for_status()
         data = response.json()
+    latency_ms = max(0, round((time.perf_counter() - started) * 1000))
 
     sources = []
     for index, result in enumerate(data.get("results") or [], 1):
@@ -114,6 +154,13 @@ async def research_web(query: str) -> dict[str, Any]:
         "sources": sources,
         "request_id": data.get("request_id"),
         "response_time": data.get("response_time"),
+        "_provider_meta": {
+            "provider": "tavily",
+            "request_id": data.get("request_id"),
+            "latency_ms": latency_ms,
+            "results": len(sources),
+            "estimated_cost_usd": None,
+        },
     }
 
 
@@ -179,16 +226,19 @@ async def review_image(image_bytes: bytes, mime_type: str, content_context: str,
         "response_format": {"type": "json_object"},
     }
     try:
+        started = time.perf_counter()
         async with httpx.AsyncClient(timeout=180) as client:
             response = await client.post(f"{LLM_BASE_URL}/chat/completions", headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
+        latency_ms = max(0, round((time.perf_counter() - started) * 1000))
         result = parse_json(data["choices"][0]["message"]["content"])
         result["passed"] = (
             float(result.get("overall", 0)) >= MEDIA_QUALITY_THRESHOLD
             and float(result.get("artifact_free", 0)) >= MEDIA_QUALITY_THRESHOLD
             and float(result.get("text_safety", 0)) >= MEDIA_QUALITY_THRESHOLD
         )
+        result["_provider_meta"] = _provider_usage_meta(data, latency_ms)
         return result
     except Exception as exc:
         return {"overall": 0.0, "passed": False, "notes": [f"visual QA failed: {exc}"]}

@@ -1,4 +1,4 @@
-"""Downstream performance ingestion and analytics."""
+"""Downstream performance ingestion, learning signals and generation economics."""
 
 from __future__ import annotations
 
@@ -11,7 +11,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.models import ContentItem, GenerationRun, PerformanceSnapshot, ProductionBatchItem, Rubric, User
+from database.generation_economics import aggregate_generation_economics
+from database.models import ContentItem, GenerationRun, GenerationStep, PerformanceSnapshot, ProductionBatchItem, Rubric, User
 from database.performance_learning import build_performance_learning_context
 
 from ..config import config
@@ -185,3 +186,41 @@ async def performance_learning(
 ):
     """Return conservative, sample-size-gated priors for future content planning."""
     return await build_performance_learning_context(db, project_id)
+
+
+@router.get("/economics")
+async def generation_economics(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Aggregate real provider usage captured by GenerationStep traces.
+
+    `known_cost_usd` includes only provider calls for which pricing was explicitly
+    configured in the worker environment. `unpriced_requests` is intentionally exposed
+    so missing pricing can never masquerade as zero cost.
+    """
+    run_ids = (
+        await db.execute(select(GenerationRun.id).where(GenerationRun.project_id == project_id))
+    ).scalars().all()
+    if not run_ids:
+        return {"project_id": str(project_id), **aggregate_generation_economics([])}
+
+    steps = (
+        await db.execute(
+            select(GenerationStep)
+            .where(GenerationStep.run_id.in_(run_ids))
+            .order_by(GenerationStep.created_at.desc())
+            .limit(50000)
+        )
+    ).scalars().all()
+    records = [
+        {
+            "stage": step.stage,
+            "provider": step.provider,
+            "model": step.model,
+            "output_json": step.output_json or {},
+        }
+        for step in steps
+    ]
+    return {"project_id": str(project_id), **aggregate_generation_economics(records)}

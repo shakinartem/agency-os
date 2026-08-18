@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, AlertTriangle, BarChart3, BrainCircuit, Eye, FlaskConical, MousePointerClick, Target, TrendingUp } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, BrainCircuit, CircleDollarSign, Clock3, Eye, FlaskConical, Gauge, MousePointerClick, Target, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useProject } from "@/context/ProjectContext";
 import { api } from "@/lib/api";
@@ -39,6 +39,27 @@ interface Learning {
     watch: LearningRow[];
     guidance: string[];
   };
+}
+
+interface EconomicsBucket {
+  requests: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  average_latency_ms: number | null;
+  known_cost_usd: number;
+  priced_requests: number;
+  unpriced_requests: number;
+}
+
+interface Economics extends EconomicsBucket {
+  project_id: string;
+  traced_steps: number;
+  pricing_complete: boolean;
+  pricing_configured_for_any: boolean;
+  by_stage: Record<string, EconomicsBucket>;
+  by_model: Record<string, EconomicsBucket>;
+  by_provider: Record<string, EconomicsBucket>;
 }
 
 const preferredMetrics = ["views", "impressions", "clicks", "leads", "conversions", "revenue"];
@@ -115,6 +136,35 @@ function LearningCard({ row, metric }: { row: LearningRow; metric: string }) {
   );
 }
 
+function EconomicsTable({ title, rows }: { title: string; rows: Record<string, EconomicsBucket> }) {
+  const entries = Object.entries(rows).sort((a, b) => b[1].known_cost_usd - a[1].known_cost_usd || b[1].requests - a[1].requests);
+  return (
+    <div>
+      <p className="mb-2 text-sm font-semibold">{title}</p>
+      {!entries.length && <p className="text-sm text-muted-foreground">Provider traces ещё не накоплены.</p>}
+      {!!entries.length && (
+        <div className="overflow-x-auto rounded-xl border">
+          <table className="w-full min-w-[680px] text-sm">
+            <thead><tr className="border-b bg-muted/30 text-left text-xs text-muted-foreground"><th className="p-3 font-medium">Сегмент</th><th className="p-3 text-right font-medium">Requests</th><th className="p-3 text-right font-medium">Tokens</th><th className="p-3 text-right font-medium">Avg latency</th><th className="p-3 text-right font-medium">Known cost</th><th className="p-3 text-right font-medium">Unpriced</th></tr></thead>
+            <tbody>
+              {entries.map(([name, row]) => (
+                <tr key={name} className="border-b last:border-0">
+                  <td className="p-3 font-medium">{name}</td>
+                  <td className="p-3 text-right tabular-nums">{row.requests}</td>
+                  <td className="p-3 text-right tabular-nums">{row.total_tokens.toLocaleString()}</td>
+                  <td className="p-3 text-right tabular-nums">{row.average_latency_ms == null ? "—" : `${row.average_latency_ms} ms`}</td>
+                  <td className="p-3 text-right tabular-nums">${row.known_cost_usd.toFixed(4)}</td>
+                  <td className="p-3 text-right tabular-nums">{row.unpriced_requests}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function PerformancePage() {
   const { current } = useProject();
   const summaryQuery = useQuery({
@@ -129,9 +179,16 @@ export default function PerformancePage() {
     enabled: Boolean(current?.id),
     refetchInterval: 15000,
   });
+  const economicsQuery = useQuery({
+    queryKey: ["generation-economics", current?.id],
+    queryFn: () => api.get<Economics>(`/performance/economics?project_id=${current?.id}`),
+    enabled: Boolean(current?.id),
+    refetchInterval: 15000,
+  });
 
   const data = summaryQuery.data;
   const learning = learningQuery.data;
+  const economics = economicsQuery.data;
   const totals = data?.totals || {};
   const views = totals.views ?? totals.impressions ?? 0;
   const clicks = totals.clicks ?? 0;
@@ -206,6 +263,34 @@ export default function PerformancePage() {
                     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{learning.recommendations.watch.map((row) => <LearningCard key={`${row.dimension}-${row.name}`} row={row} metric={learning.primary_metric} />)}</div>
                   </div>
                 )}
+              </CardContent>
+            </Card>
+          )}
+
+          {economics && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2"><CircleDollarSign className="h-5 w-5" /><CardTitle>Generation economics</CardTitle></div>
+                    <p className="mt-2 max-w-3xl text-sm text-muted-foreground">Стоимость считается только для запросов, где тариф модели явно задан в окружении. Неоценённые вызовы остаются `unpriced`, а не превращаются в фиктивный $0.</p>
+                  </div>
+                  <span className="rounded-full border px-3 py-1 text-xs text-muted-foreground">{economics.pricing_complete ? "pricing complete" : "partial pricing"}</span>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <div className="rounded-xl border p-4"><Activity className="h-4 w-4 text-muted-foreground" /><p className="mt-3 text-xs text-muted-foreground">Provider requests</p><p className="mt-1 text-2xl font-bold tabular-nums">{economics.requests}</p></div>
+                  <div className="rounded-xl border p-4"><Gauge className="h-4 w-4 text-muted-foreground" /><p className="mt-3 text-xs text-muted-foreground">Total tokens</p><p className="mt-1 text-2xl font-bold tabular-nums">{economics.total_tokens.toLocaleString()}</p></div>
+                  <div className="rounded-xl border p-4"><Clock3 className="h-4 w-4 text-muted-foreground" /><p className="mt-3 text-xs text-muted-foreground">Avg latency</p><p className="mt-1 text-2xl font-bold tabular-nums">{economics.average_latency_ms == null ? "—" : `${economics.average_latency_ms} ms`}</p></div>
+                  <div className="rounded-xl border p-4"><CircleDollarSign className="h-4 w-4 text-muted-foreground" /><p className="mt-3 text-xs text-muted-foreground">Known cost</p><p className="mt-1 text-2xl font-bold tabular-nums">${economics.known_cost_usd.toFixed(4)}</p></div>
+                  <div className="rounded-xl border p-4"><AlertTriangle className="h-4 w-4 text-muted-foreground" /><p className="mt-3 text-xs text-muted-foreground">Unpriced requests</p><p className="mt-1 text-2xl font-bold tabular-nums">{economics.unpriced_requests}</p></div>
+                </div>
+                {!economics.pricing_configured_for_any && economics.requests > 0 && (
+                  <div className="rounded-xl border border-dashed p-4 text-sm text-muted-foreground">Укажи `LLM_INPUT_COST_PER_1M_USD` и `LLM_OUTPUT_COST_PER_1M_USD` для выбранной модели — после этого новые traces начнут сохранять известную стоимость. Старые вызовы намеренно не пересчитываются задним числом по потенциально другому тарифу.</div>
+                )}
+                <EconomicsTable title="По этапу pipeline" rows={economics.by_stage} />
+                <EconomicsTable title="По модели" rows={economics.by_model} />
               </CardContent>
             </Card>
           )}
