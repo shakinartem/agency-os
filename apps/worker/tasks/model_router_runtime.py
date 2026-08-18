@@ -1,11 +1,13 @@
 """Runtime extension that applies the conservative Model Router without coupling it to the core pipeline.
 
 Shadow mode can collect prompt-level evidence for under-sampled candidates without changing
-user-visible production output. Candidate output is never used downstream. Only compact
-hashes, judge scores and provider telemetry are persisted in GenerationStep traces.
+user-visible production output. Control and candidate run in parallel; the judge sees blinded
+A/B labels. Candidate output is never used downstream. Only compact hashes, judge scores and
+provider telemetry are persisted in GenerationStep traces.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -188,35 +190,33 @@ def _mark_shadow_sampled(context: dict[str, Any]) -> None:
     context["already_sampled"] = True
 
 
-async def _run_shadow_trial(
+def _judge_order(context: dict[str, Any]) -> bool:
+    """True means production is response A. Deterministic for retry stability."""
+    return deterministic_fraction(context.get("run_id"), f"{context.get('stage_family')}:judge-order") < 0.5
+
+
+async def _judge_shadow_trial(
     system: str,
     prompt: str,
     production_result: dict[str, Any],
+    candidate_result: dict[str, Any],
     context: dict[str, Any],
     candidate_model: str,
 ) -> dict[str, Any]:
-    _mark_shadow_sampled(context)
-    try:
-        candidate_result = await _call_model(system, prompt, candidate_model)
-    except Exception as exc:
-        return {
-            "version": "shadow-trial/1.0",
-            "status": "candidate_failed",
-            "candidate_model": candidate_model,
-            "error": str(exc)[:1000],
-        }
-
     candidate_meta = candidate_result.get("_provider_meta") if isinstance(candidate_result.get("_provider_meta"), dict) else {}
     judge_model = os.getenv("MODEL_ROUTER_JUDGE_MODEL", "").strip() or providers.LLM_MODEL
+    production_is_a = _judge_order(context)
+    response_a = production_result if production_is_a else candidate_result
+    response_b = candidate_result if production_is_a else production_result
     judge_prompt = (
-        "Compare two candidate JSON responses to the same production prompt. Score each 0..1 for instruction adherence, "
-        "factual restraint, usefulness, clarity and format correctness. Do not reward verbosity. The production response "
-        "is the control; the candidate is experimental. Return JSON only with exactly: "
-        '{"production_quality":0.0,"candidate_quality":0.0,"winner":"production|candidate|tie","notes":[]}.'
+        "Compare two anonymous JSON responses to the same prompt. Score each 0..1 for instruction adherence, factual restraint, "
+        "usefulness, clarity and format correctness. Do not infer which model produced either answer. Do not reward verbosity. "
+        "Return JSON only with exactly: "
+        '{"a_quality":0.0,"b_quality":0.0,"winner":"A|B|tie","notes":[]}.'
         f"\nOriginal system instruction: {system}"
         f"\nOriginal user prompt: {prompt}"
-        f"\nProduction response: {json.dumps(_without_internal(production_result), ensure_ascii=False)}"
-        f"\nCandidate response: {json.dumps(_without_internal(candidate_result), ensure_ascii=False)}"
+        f"\nResponse A: {json.dumps(_without_internal(response_a), ensure_ascii=False)}"
+        f"\nResponse B: {json.dumps(_without_internal(response_b), ensure_ascii=False)}"
     )
     try:
         judged = await _call_model(
@@ -237,17 +237,30 @@ async def _run_shadow_trial(
         }
 
     judge_meta = judged.get("_provider_meta") if isinstance(judged.get("_provider_meta"), dict) else {}
-    production_quality = judged.get("production_quality")
-    candidate_quality = judged.get("candidate_quality")
-    valid_scores = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (production_quality, candidate_quality))
+    a_quality = judged.get("a_quality")
+    b_quality = judged.get("b_quality")
+    valid_scores = all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in (a_quality, b_quality))
+    production_quality = float(a_quality if production_is_a else b_quality) if valid_scores else None
+    candidate_quality = float(b_quality if production_is_a else a_quality) if valid_scores else None
+    raw_winner = str(judged.get("winner") or "tie").upper()
+    if raw_winner == "TIE":
+        winner = "tie"
+    elif (raw_winner == "A" and production_is_a) or (raw_winner == "B" and not production_is_a):
+        winner = "production"
+    elif raw_winner in {"A", "B"}:
+        winner = "candidate"
+    else:
+        winner = "unknown"
+
     return {
         "version": "shadow-trial/1.0",
         "status": "passed" if valid_scores else "invalid_judge_scores",
         "candidate_model": candidate_model,
         "judge_model": judge_model,
-        "production_quality": float(production_quality) if valid_scores else None,
-        "candidate_quality": float(candidate_quality) if valid_scores else None,
-        "winner": judged.get("winner"),
+        "judge_order": "production=A" if production_is_a else "production=B",
+        "production_quality": production_quality,
+        "candidate_quality": candidate_quality,
+        "winner": winner,
         "notes": (judged.get("notes") or [])[:10] if isinstance(judged.get("notes"), list) else [],
         "candidate_provider_meta": candidate_meta,
         "judge_provider_meta": judge_meta,
@@ -263,15 +276,40 @@ async def _run_shadow_trial(
 async def routed_chat_json(system: str, prompt: str, *, model: str | None = None) -> dict[str, Any]:
     """Return production output while optionally collecting an isolated shadow candidate trial."""
     selected_model = model or _ROUTED_MODEL.get() or providers.LLM_MODEL
-    production_result = await _call_model(system, prompt, selected_model)
-
     context = _ROUTER_CONTEXT.get()
     candidate_model = _shadow_candidate((context or {}).get("decision") or {}, providers.LLM_MODEL)
-    if _should_shadow_trial(context, candidate_model):
-        trace = await _run_shadow_trial(system, prompt, production_result, context or {}, candidate_model or "")
-        _SHADOW_TRACE.set(trace)
-    else:
+    do_shadow = _should_shadow_trial(context, candidate_model)
+
+    if not do_shadow:
         _SHADOW_TRACE.set(None)
+        return await _call_model(system, prompt, selected_model)
+
+    _mark_shadow_sampled(context or {})
+    production_call = _call_model(system, prompt, selected_model)
+    candidate_call = _call_model(system, prompt, candidate_model or "")
+    production_result, candidate_result = await asyncio.gather(production_call, candidate_call, return_exceptions=True)
+
+    if isinstance(production_result, BaseException):
+        _SHADOW_TRACE.set(None)
+        raise production_result
+    if isinstance(candidate_result, BaseException):
+        _SHADOW_TRACE.set({
+            "version": "shadow-trial/1.0",
+            "status": "candidate_failed",
+            "candidate_model": candidate_model,
+            "error": str(candidate_result)[:1000],
+        })
+        return production_result
+
+    trace = await _judge_shadow_trial(
+        system,
+        prompt,
+        production_result,
+        candidate_result,
+        context or {},
+        candidate_model or "",
+    )
+    _SHADOW_TRACE.set(trace)
     return production_result
 
 
