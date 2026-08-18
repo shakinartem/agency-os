@@ -1,4 +1,7 @@
+import uuid
+
 from database.generation_economics import aggregate_generation_economics, extract_provider_meta
+from database.models import ContentItem, ContentVersion
 
 
 def meta(*, provider="openai-compatible", model="gpt-test", input_tokens=100, output_tokens=50, latency_ms=200, cost=None):
@@ -50,3 +53,23 @@ def test_economics_groups_by_stage_model_and_provider():
     assert result["by_stage"]["draft"]["average_latency_ms"] == 200
     assert result["by_model"]["writer"]["known_cost_usd"] == 0.004
     assert result["by_provider"]["search"]["unpriced_requests"] == 1
+
+
+def test_provider_trace_metadata_is_stripped_from_content_payloads():
+    project_id = uuid.uuid4()
+    content_id = uuid.uuid4()
+    payload = {
+        "title": "Clean content",
+        "nested": {"value": 1, "_provider_meta": meta(cost=0.001)},
+        "_provider_meta": meta(cost=0.002),
+    }
+    item = ContentItem(project_id=project_id, title="Clean content", structured_json=payload)
+    version = ContentVersion(
+        content_item_id=content_id,
+        version=1,
+        stage="draft",
+        structured_json=payload,
+    )
+    assert "_provider_meta" not in item.structured_json
+    assert "_provider_meta" not in item.structured_json["nested"]
+    assert "_provider_meta" not in version.structured_json
