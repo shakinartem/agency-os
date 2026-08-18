@@ -12,7 +12,7 @@ import uuid
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from database.model_router import build_model_router_report
+from database.model_router_evidence import build_model_router_report
 from database.models import User
 
 from ..database import get_db
