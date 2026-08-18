@@ -12,4 +12,4 @@ COPY integrations/ integrations/
 
 ENV PYTHONPATH=/app:/app/packages
 
-CMD ["celery", "-A", "apps.worker.tasks.factory_worker", "worker", "--loglevel=info", "--include", "apps.worker.tasks.review_tasks,apps.worker.tasks.strategy_tasks,apps.worker.tasks.batch_tasks,apps.worker.tasks.dispatch_tasks,apps.worker.tasks.delivery_tasks"]
+CMD ["celery", "-A", "apps.worker.tasks.factory_worker", "worker", "--loglevel=info", "--include", "apps.worker.tasks.review_tasks,apps.worker.tasks.strategy_tasks,apps.worker.tasks.batch_tasks,apps.worker.tasks.dispatch_tasks,apps.worker.tasks.delivery_tasks,apps.worker.tasks.model_router_runtime"]
