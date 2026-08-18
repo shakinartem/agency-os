@@ -16,7 +16,7 @@ from typing import Any
 import httpx
 
 from database.model_router import deterministic_fraction
-from database.model_router_evidence import choose_model_for_run_stage
+from database.model_router_active import choose_model_for_run_stage
 
 from . import batch_tasks, factory_worker, review_tasks, strategy_tasks
 from . import providers
@@ -230,6 +230,7 @@ async def _run_shadow_trial(
             "status": "judge_failed",
             "candidate_model": candidate_model,
             "candidate_provider_meta": candidate_meta,
+            "provider_traces": [{"role": "candidate", "_provider_meta": candidate_meta}],
             "production_output_hash": _payload_hash(production_result),
             "candidate_output_hash": _payload_hash(candidate_result),
             "error": str(exc)[:1000],
@@ -250,6 +251,10 @@ async def _run_shadow_trial(
         "notes": (judged.get("notes") or [])[:10] if isinstance(judged.get("notes"), list) else [],
         "candidate_provider_meta": candidate_meta,
         "judge_provider_meta": judge_meta,
+        "provider_traces": [
+            {"role": "candidate", "_provider_meta": candidate_meta},
+            {"role": "judge", "_provider_meta": judge_meta},
+        ],
         "production_output_hash": _payload_hash(production_result),
         "candidate_output_hash": _payload_hash(candidate_result),
     }
