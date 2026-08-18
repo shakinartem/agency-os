@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 import uuid
 from collections import defaultdict
 from typing import Any
@@ -12,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.generation_economics import aggregate_generation_economics
+from database.model_router_cache import mark_model_router_snapshot_stale, schedule_model_router_refresh
 from database.models import ContentItem, GenerationRun, GenerationStep, PerformanceSnapshot, ProductionBatchItem, Rubric, User
 from database.performance_learning import build_performance_learning_context
 
@@ -83,6 +85,13 @@ async def ingest_performance(
     )
     db.add(row)
     await db.flush()
+
+    # Performance is the highest-value new routing evidence. Invalidate the materialized
+    # router read-model immediately and enqueue a durable refresh in the same transaction.
+    default_model = os.getenv("LLM_MODEL", "gpt-5.6")
+    await mark_model_router_snapshot_stale(db, item.project_id, default_model)
+    await schedule_model_router_refresh(db, item.project_id)
+
     await db.refresh(row)
     return {"status": "accepted", "snapshot": _json(row)}
 
@@ -124,8 +133,6 @@ async def performance_summary(
         )
     ).scalars().all()
 
-    # Callbacks are snapshots, not additive events: count only the newest snapshot
-    # for each downstream publication.
     latest: dict[tuple[str, str], PerformanceSnapshot] = {}
     for row in rows:
         latest.setdefault((row.source, row.external_publication_id), row)
@@ -184,7 +191,6 @@ async def performance_learning(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Return conservative, sample-size-gated priors for future content planning."""
     return await build_performance_learning_context(db, project_id)
 
 
@@ -194,12 +200,6 @@ async def generation_economics(
     db: AsyncSession = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Aggregate real provider usage captured by GenerationStep traces.
-
-    `known_cost_usd` includes only provider calls for which pricing was explicitly
-    configured in the worker environment. `unpriced_requests` is intentionally exposed
-    so missing pricing can never masquerade as zero cost.
-    """
     run_ids = (
         await db.execute(select(GenerationRun.id).where(GenerationRun.project_id == project_id))
     ).scalars().all()
@@ -215,12 +215,7 @@ async def generation_economics(
         )
     ).scalars().all()
     records = [
-        {
-            "stage": step.stage,
-            "provider": step.provider,
-            "model": step.model,
-            "output_json": step.output_json or {},
-        }
+        {"stage": step.stage, "provider": step.provider, "model": step.model, "output_json": step.output_json or {}}
         for step in steps
     ]
     return {"project_id": str(project_id), **aggregate_generation_economics(records)}
