@@ -102,9 +102,9 @@ Default mode:
 MODEL_ROUTER_MODE=shadow
 ```
 
-Production output always comes from the default model. On a small, retry-stable sample of run/stage families, Factory also calls one under-sampled candidate in parallel. A blinded A/B judge compares the control and candidate.
+Production output always comes from the default model. On a small, retry-stable sample of run/stage families, Factory calls the default model and one under-sampled candidate **in parallel**. A blinded A/B judge compares Response A and Response B without being told which is production or candidate.
 
-Candidate output is **never** used downstream. The trace keeps only compact hashes, quality scores and provider telemetry rather than storing a second unpublished content body.
+Candidate output is **never** used downstream. The trace keeps only compact output hashes, quality scores and provider telemetry rather than persisting a second unpublished content body.
 
 ### 2. Controlled live exploration
 
