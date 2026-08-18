@@ -10,6 +10,8 @@ import { api } from "@/lib/api";
 interface Candidate {
   model: string;
   samples: number;
+  live_samples: number;
+  shadow_samples: number;
   quality_samples: number;
   performance_samples: number;
   priced_samples: number;
@@ -19,15 +21,19 @@ interface Candidate {
   average_cost_usd: number | null;
   quality_gate_passed: boolean;
   eligible: boolean;
+  production_eligible: boolean;
   confidence: "low" | "medium" | "high";
   score: number | null;
 }
 
 interface StageReport {
   recommended_model: string;
+  shadow_recommended_model: string;
   routing_ready: boolean;
+  shadow_ready: boolean;
   candidate_count: number;
   eligible_count: number;
+  production_eligible_count: number;
   candidates: Candidate[];
 }
 
@@ -37,7 +43,9 @@ interface RouterReport {
   default_model: string;
   configured_candidates: string[];
   minimum_samples_per_model: number;
+  minimum_live_samples: number;
   quality_floor: number;
+  shadow_sample_rate: number;
   exploration_rate: number;
   performance_metric: string | null;
   stages: Record<string, StageReport>;
@@ -86,8 +94,8 @@ export default function ModelRoutingPage() {
         </div>
         <h1 className="mt-1 text-3xl font-bold tracking-tight">Какая модель должна делать каждый этап</h1>
         <p className="mt-2 max-w-4xl text-sm text-muted-foreground">
-          Router сравнивает модели только после минимальной выборки и quality gate. Downstream performance используется как шумный prior,
-          а не как доказательство причинности. В shadow mode рекомендации видны здесь, но production продолжает работать на default model.
+          Shadow evidence и live evidence разделены. Offline candidate сначала доказывает качество, цену и latency на blinded A/B trial,
+          а полный production routing разрешается только после минимальной живой выборки. Downstream performance — шумный prior, а не причинное доказательство.
         </p>
       </div>
 
@@ -97,26 +105,29 @@ export default function ModelRoutingPage() {
 
       {current && data && (
         <>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-6">
             <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Mode</p><div className="mt-2"><ModeBadge mode={data.mode} /></div></CardContent></Card>
             <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Default model</p><p className="mt-2 truncate font-semibold">{data.default_model}</p></CardContent></Card>
             <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Candidates</p><p className="mt-2 text-2xl font-bold">{data.configured_candidates.length}</p></CardContent></Card>
-            <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Min samples / model</p><p className="mt-2 text-2xl font-bold">{data.minimum_samples_per_model}</p></CardContent></Card>
-            <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Exploration</p><p className="mt-2 text-2xl font-bold">{(data.exploration_rate * 100).toFixed(0)}%</p></CardContent></Card>
+            <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Min total samples</p><p className="mt-2 text-2xl font-bold">{data.minimum_samples_per_model}</p></CardContent></Card>
+            <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Min live samples</p><p className="mt-2 text-2xl font-bold">{data.minimum_live_samples}</p></CardContent></Card>
+            <Card><CardContent className="p-4"><p className="text-xs text-muted-foreground">Shadow / live explore</p><p className="mt-2 text-xl font-bold">{(data.shadow_sample_rate * 100).toFixed(0)}% / {(data.exploration_rate * 100).toFixed(0)}%</p></CardContent></Card>
           </div>
 
           {data.mode === "shadow" && (
             <Card className="border-amber-200 bg-amber-50/50">
               <CardContent className="flex gap-3 p-5 text-sm">
                 <FlaskConical className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-                <div><strong>Shadow mode безопасно включён.</strong> Router записывает evidence и показывает, куда бы направил трафик, но фактически использует {data.default_model}. Переключать `MODEL_ROUTER_MODE=active` стоит только после появления минимум двух eligible моделей на нужном stage.</div>
+                <div>
+                  <strong>Shadow mode безопасно включён.</strong> Production всегда остаётся на {data.default_model}. На небольшой детерминированной доле run control и одна недоисследованная candidate-модель вызываются параллельно, после чего blinded judge сравнивает A/B. Candidate output никогда не попадает пользователю.
+                </div>
               </CardContent>
             </Card>
           )}
 
           <div className="grid gap-4 md:grid-cols-3">
             <Card><CardContent className="flex gap-3 p-5"><ShieldCheck className="h-5 w-5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Quality floor</p><p className="mt-1 text-xl font-bold">{pct(data.quality_floor)}</p></div></CardContent></Card>
-            <Card><CardContent className="flex gap-3 p-5"><Activity className="h-5 w-5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Performance proxy</p><p className="mt-1 text-sm font-semibold">{data.performance_metric || "ещё нет данных"}</p></div></CardContent></Card>
+            <Card><CardContent className="flex gap-3 p-5"><Activity className="h-5 w-5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Performance proxy</p><p className="mt-1 text-sm font-semibold">{data.performance_metric || "ещё нет live данных"}</p></div></CardContent></Card>
             <Card><CardContent className="flex gap-3 p-5"><Coins className="h-5 w-5 text-muted-foreground" /><div><p className="text-xs text-muted-foreground">Pricing rule</p><p className="mt-1 text-sm font-semibold">Unknown ≠ free</p></div></CardContent></Card>
           </div>
 
@@ -127,27 +138,32 @@ export default function ModelRoutingPage() {
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <CardTitle>{stageNames[stage] || stage}</CardTitle>
-                      <p className="mt-1 text-xs text-muted-foreground">Recommended: <strong className="text-foreground">{report.recommended_model}</strong></p>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                        <span>Live recommendation: <strong className="text-foreground">{report.recommended_model}</strong></span>
+                        <span>Shadow leader: <strong className="text-foreground">{report.shadow_recommended_model}</strong></span>
+                      </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <Badge variant={report.routing_ready ? "default" : "outline"}>{report.routing_ready ? "routing ready" : "collecting evidence"}</Badge>
-                      <Badge variant="secondary">{report.eligible_count}/{report.candidate_count} eligible</Badge>
+                      <Badge variant={report.routing_ready ? "default" : "outline"}>{report.routing_ready ? "full routing ready" : "live gate pending"}</Badge>
+                      <Badge variant={report.shadow_ready ? "secondary" : "outline"}>{report.shadow_ready ? "shadow comparison ready" : "collecting shadow evidence"}</Badge>
                     </div>
                   </div>
                 </CardHeader>
                 <CardContent>
                   <div className="overflow-x-auto">
-                    <table className="w-full min-w-[900px] text-sm">
+                    <table className="w-full min-w-[1080px] text-sm">
                       <thead>
                         <tr className="border-b text-left text-xs text-muted-foreground">
                           <th className="pb-2 font-medium">Model</th>
-                          <th className="pb-2 text-right font-medium">Samples</th>
+                          <th className="pb-2 text-right font-medium">Total</th>
+                          <th className="pb-2 text-right font-medium">Shadow</th>
+                          <th className="pb-2 text-right font-medium">Live</th>
                           <th className="pb-2 text-right font-medium">Quality</th>
                           <th className="pb-2 text-right font-medium">Perf proxy</th>
                           <th className="pb-2 text-right font-medium">Latency</th>
                           <th className="pb-2 text-right font-medium">Cost / req</th>
                           <th className="pb-2 text-right font-medium">Score</th>
-                          <th className="pb-2 text-right font-medium">Confidence</th>
+                          <th className="pb-2 text-right font-medium">Status</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -156,17 +172,21 @@ export default function ModelRoutingPage() {
                             <td className="py-3">
                               <div className="flex items-center gap-2">
                                 <span className="font-medium">{candidate.model}</span>
-                                {candidate.model === report.recommended_model && <Badge variant="secondary">recommended</Badge>}
-                                {!candidate.quality_gate_passed && candidate.samples > 0 && <Badge variant="outline">quality gate</Badge>}
+                                {candidate.model === report.recommended_model && <Badge variant="secondary">live leader</Badge>}
+                                {candidate.model === report.shadow_recommended_model && candidate.model !== report.recommended_model && <Badge variant="outline">shadow leader</Badge>}
                               </div>
                             </td>
                             <td className="py-3 text-right tabular-nums">{candidate.samples}</td>
+                            <td className="py-3 text-right tabular-nums">{candidate.shadow_samples}</td>
+                            <td className="py-3 text-right tabular-nums">{candidate.live_samples}</td>
                             <td className="py-3 text-right tabular-nums">{pct(candidate.average_quality)}</td>
                             <td className="py-3 text-right tabular-nums">{pct(candidate.average_performance_proxy)}</td>
                             <td className="py-3 text-right tabular-nums">{candidate.average_latency_ms == null ? "—" : `${candidate.average_latency_ms} ms`}</td>
                             <td className="py-3 text-right tabular-nums">{money(candidate.average_cost_usd)}</td>
                             <td className="py-3 text-right tabular-nums">{candidate.score == null ? "—" : candidate.score.toFixed(4)}</td>
-                            <td className="py-3 text-right"><Badge variant="outline">{candidate.confidence}</Badge></td>
+                            <td className="py-3 text-right">
+                              {candidate.production_eligible ? <Badge>production eligible</Badge> : candidate.eligible ? <Badge variant="secondary">shadow qualified</Badge> : <Badge variant="outline">{candidate.confidence}</Badge>}
+                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -180,8 +200,8 @@ export default function ModelRoutingPage() {
           <Card>
             <CardContent className="grid gap-4 p-5 text-sm md:grid-cols-3">
               <div className="flex gap-2"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><span><strong>Quality first.</strong> Дешёвая модель ниже floor не может выиграть за счёт цены.</span></div>
-              <div className="flex gap-2"><Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><span><strong>Cost/latency second.</strong> Они оптимизируются только среди моделей с достаточной доказательной базой.</span></div>
-              <div className="flex gap-2"><FlaskConical className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><span><strong>Exploration deterministic.</strong> Retry одного run/stage не перескакивает между моделями.</span></div>
+              <div className="flex gap-2"><Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><span><strong>Shadow ≠ live.</strong> Offline judge открывает только путь к controlled exploration; полный routing требует живой выборки.</span></div>
+              <div className="flex gap-2"><FlaskConical className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" /><span><strong>Retry-stable.</strong> Shadow sampling, A/B order и live exploration детерминированы по run/stage.</span></div>
             </CardContent>
           </Card>
         </>
