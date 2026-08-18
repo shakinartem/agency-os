@@ -2,8 +2,8 @@
 
 Shadow trials can establish prompt-level quality/cost/latency evidence, but they cannot prove
 real downstream performance. A non-default candidate therefore needs a minimum number of
-live production samples before it becomes eligible for full routing. Active mode can still
-give shadow-qualified candidates deterministic exploration traffic to collect those samples.
+live production samples before it becomes eligible for full routing. Evidence is isolated by
+`CONTENT_PROMPT_VERSION` so prompt changes cannot masquerade as model improvements.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .model_router import (
     score_stage_candidates,
     stage_family,
 )
+from .model_router_prompt import current_content_prompt_version
 from .models import GenerationRun, GenerationStep, PerformanceSnapshot
 
 
@@ -140,6 +141,7 @@ async def build_model_router_report(session, project_id: uuid.UUID, *, default_m
     quality_floor = min(1.0, max(0.0, float(os.getenv("MODEL_ROUTER_QUALITY_FLOOR", "0.84"))))
     shadow_sample_rate = min(0.5, max(0.0, float(os.getenv("MODEL_ROUTER_SHADOW_SAMPLE_RATE", "0.05"))))
     exploration_rate = min(0.5, max(0.0, float(os.getenv("MODEL_ROUTER_EXPLORATION_RATE", "0.10"))))
+    prompt_version = current_content_prompt_version()
 
     runs = (await session.execute(select(GenerationRun).where(GenerationRun.project_id == project_id))).scalars().all()
     run_map = {run.id: run for run in runs}
@@ -168,7 +170,11 @@ async def build_model_router_report(session, project_id: uuid.UUID, *, default_m
     if run_map:
         steps = (await session.execute(
             select(GenerationStep)
-            .where(GenerationStep.run_id.in_(list(run_map)), GenerationStep.provider == "openai-compatible")
+            .where(
+                GenerationStep.run_id.in_(list(run_map)),
+                GenerationStep.provider == "openai-compatible",
+                GenerationStep.prompt_version == prompt_version,
+            )
             .order_by(GenerationStep.created_at.desc())
             .limit(50000)
         )).scalars().all()
@@ -194,6 +200,7 @@ async def build_model_router_report(session, project_id: uuid.UUID, *, default_m
         "mode": router_mode(),
         "default_model": default_model,
         "configured_candidates": candidates,
+        "evidence_prompt_version": prompt_version,
         "minimum_samples_per_model": min_samples,
         "minimum_live_samples": min_live_samples,
         "quality_floor": quality_floor,
@@ -243,6 +250,7 @@ async def choose_model_for_run_stage(session, run: GenerationRun, stage: str, *,
     )
     decision["shadow_sample_rate"] = float(report.get("shadow_sample_rate") or 0.0)
     decision["evidence"] = {
+        "prompt_version": report.get("evidence_prompt_version"),
         "minimum_samples_per_model": report.get("minimum_samples_per_model"),
         "minimum_live_samples": report.get("minimum_live_samples"),
         "quality_floor": report.get("quality_floor"),
