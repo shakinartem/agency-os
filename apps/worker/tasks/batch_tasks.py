@@ -12,6 +12,7 @@ from sqlalchemy import select
 from database.base import get_async_session_maker
 from database.enums import GenerationRunStatus
 from database.models import BrandProfile, GenerationRun, ProductionBatch, ProductionBatchItem, Rubric
+from database.performance_learning import build_performance_learning_context
 from database.task_outbox import enqueue_task
 
 from .batch_prompts import generation_prompt, revision_prompt
@@ -21,6 +22,17 @@ from .knowledge import retrieve_knowledge
 from .providers import chat_json, research_web
 
 MAX_BATCH_ITEMS = 100
+
+
+def _compact_learning_snapshot(context: dict) -> dict:
+    return {
+        "status": context.get("status"),
+        "publications": context.get("publications", 0),
+        "primary_metric": context.get("primary_metric"),
+        "baseline": context.get("baseline"),
+        "exploration_share": context.get("exploration_share"),
+        "recommendations": context.get("recommendations") or {},
+    }
 
 
 async def _plan_batch(batch_id: str) -> None:
@@ -62,10 +74,43 @@ async def _plan_batch(batch_id: str) -> None:
             if (batch.options or {}).get("use_research", True):
                 research_sources = (await research_web(batch.objective)).get("sources") or []
 
-            step = await _stage(session, planner_run, "batch_generate_plan", {"objective": batch.objective, "content_mix": content_mix, "platforms": batch.platforms, "rubric_count": len(rubrics)})
+            use_performance = (batch.options or {}).get("use_performance_learning", True)
+            performance = (
+                await build_performance_learning_context(session, batch.project_id)
+                if use_performance
+                else {
+                    "status": "disabled",
+                    "publications": 0,
+                    "primary_metric": None,
+                    "baseline": 0,
+                    "exploration_share": 0.25,
+                    "recommendations": {"winners": [], "watch": [], "guidance": ["Performance learning disabled for this batch."]},
+                }
+            )
+            learning_snapshot = _compact_learning_snapshot(performance)
+            batch.options = {**(batch.options or {}), "performance_learning_snapshot": learning_snapshot}
+
+            step = await _stage(session, planner_run, "batch_generate_plan", {
+                "objective": batch.objective,
+                "content_mix": content_mix,
+                "platforms": batch.platforms,
+                "rubric_count": len(rubrics),
+                "performance_status": performance.get("status"),
+                "performance_publications": performance.get("publications", 0),
+                "performance_primary_metric": performance.get("primary_metric"),
+            })
             plan = await chat_json(
                 "You are a senior content portfolio strategist. Return JSON only. Build a production series, not a random list.",
-                generation_prompt(objective=batch.objective, platforms=batch.platforms or [], content_mix=content_mix, brand=brand, rubrics=rubrics, knowledge=knowledge, research=research_sources),
+                generation_prompt(
+                    objective=batch.objective,
+                    platforms=batch.platforms or [],
+                    content_mix=content_mix,
+                    brand=brand,
+                    rubrics=rubrics,
+                    knowledge=knowledge,
+                    research=research_sources,
+                    performance=performance,
+                ),
             )
             await _complete_step(session, step, plan)
             items = plan.get("items") or []
@@ -96,6 +141,9 @@ async def _plan_batch(batch_id: str) -> None:
             batch.status = "production"
             for position, spec in enumerate(items, start=1):
                 rubric_id = spec.get("rubric_id")
+                learning_mode = str(spec.get("learning_mode") or "explore").lower()
+                if learning_mode not in {"exploit", "explore"}:
+                    learning_mode = "explore"
                 child_run = GenerationRun(
                     project_id=batch.project_id,
                     task=(
@@ -105,11 +153,19 @@ async def _plan_batch(batch_id: str) -> None:
                         f"Goal: {spec.get('goal') or ''}\n"
                         f"Angle: {spec.get('angle') or ''}\n"
                         f"Audience stage: {spec.get('audience_stage') or ''}\n"
+                        f"Learning mode: {learning_mode}\n"
                         f"Brief: {spec.get('brief') or ''}"
                     ),
                     content_type=str(spec.get("content_type") or "post").lower(),
                     platforms=batch.platforms or ["telegram"],
-                    options={**(batch.options or {}), "batch_id": str(batch.id), "batch_position": position, "rubric_id": rubric_id, "planned_topic": spec.get("topic")},
+                    options={
+                        **(batch.options or {}),
+                        "batch_id": str(batch.id),
+                        "batch_position": position,
+                        "rubric_id": rubric_id,
+                        "planned_topic": spec.get("topic"),
+                        "learning_mode": learning_mode,
+                    },
                 )
                 session.add(child_run)
                 await session.flush()
@@ -122,7 +178,13 @@ async def _plan_batch(batch_id: str) -> None:
                     topic=str(spec.get("topic") or "")[:500],
                     goal=(str(spec.get("goal"))[:255] if spec.get("goal") else None),
                     status="queued",
-                    metadata_json={"angle": spec.get("angle"), "audience_stage": spec.get("audience_stage"), "brief": spec.get("brief")},
+                    metadata_json={
+                        "angle": spec.get("angle"),
+                        "audience_stage": spec.get("audience_stage"),
+                        "brief": spec.get("brief"),
+                        "learning_mode": learning_mode,
+                        "performance_primary_metric": performance.get("primary_metric"),
+                    },
                 ))
                 await enqueue_task(session, "content_factory.process_run", args=[str(child_run.id)], dedupe_key=f"run:{child_run.id}:process")
 

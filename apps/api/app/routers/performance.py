@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import ContentItem, GenerationRun, PerformanceSnapshot, ProductionBatchItem, Rubric, User
+from database.performance_learning import build_performance_learning_context
 
 from ..config import config
 from ..database import get_db
@@ -158,7 +159,7 @@ async def performance_summary(
         rubric_name = rubrics.get(batch_item.rubric_id, "Unassigned") if batch_item else "Unassigned"
         rubric_bucket = by_rubric.setdefault(rubric_name, defaultdict(float))
         for metric, raw in (snapshot.metrics or {}).items():
-            if isinstance(raw, (int, float)):
+            if isinstance(raw, (int, float)) and not isinstance(raw, bool):
                 value = float(raw)
                 totals[metric] += value
                 type_bucket[metric] += value
@@ -174,3 +175,13 @@ async def performance_summary(
         "by_content_type": {key: clean(value) for key, value in by_type.items()},
         "by_rubric": {key: clean(value) for key, value in by_rubric.items()},
     }
+
+
+@router.get("/learning")
+async def performance_learning(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """Return conservative, sample-size-gated priors for future content planning."""
+    return await build_performance_learning_context(db, project_id)

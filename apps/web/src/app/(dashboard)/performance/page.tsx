@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Activity, BarChart3, Eye, MousePointerClick, Target, TrendingUp } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, BrainCircuit, Eye, FlaskConical, MousePointerClick, Target, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useProject } from "@/context/ProjectContext";
 import { api } from "@/lib/api";
@@ -12,6 +12,33 @@ interface Summary {
   totals: Record<string, number>;
   by_content_type: Record<string, Record<string, number>>;
   by_rubric: Record<string, Record<string, number>>;
+}
+
+interface LearningRow {
+  dimension: string;
+  name: string;
+  publications: number;
+  metric_value: number;
+  lift_vs_baseline: number | null;
+  confidence: "low" | "medium" | "high";
+  action: "explore" | "scale_cautiously" | "reduce_and_retest" | "keep_testing";
+}
+
+interface Learning {
+  status: "learning" | "insufficient_data" | "disabled";
+  publications: number;
+  primary_metric: string;
+  primary_metric_label: string;
+  baseline: number;
+  exploration_share: number;
+  by_content_type: LearningRow[];
+  by_rubric: LearningRow[];
+  by_platform: LearningRow[];
+  recommendations: {
+    winners: LearningRow[];
+    watch: LearningRow[];
+    guidance: string[];
+  };
 }
 
 const preferredMetrics = ["views", "impressions", "clicks", "leads", "conversions", "revenue"];
@@ -55,15 +82,56 @@ function Breakdown({ title, rows }: { title: string; rows: Record<string, Record
   );
 }
 
+function formatLearningMetric(value: number, metric: string) {
+  if (metric === "ctr") return `${(value * 100).toFixed(2)}%`;
+  if (metric.includes("per_1000")) return value.toFixed(2);
+  return value.toFixed(1);
+}
+
+function LearningCard({ row, metric }: { row: LearningRow; metric: string }) {
+  const lift = row.lift_vs_baseline == null ? "—" : `${row.lift_vs_baseline >= 0 ? "+" : ""}${(row.lift_vs_baseline * 100).toFixed(0)}%`;
+  const actionLabel = {
+    explore: "Нужна выборка",
+    scale_cautiously: "Аккуратно масштабировать",
+    reduce_and_retest: "Снизить долю и перетестировать",
+    keep_testing: "Продолжать тест",
+  }[row.action];
+  return (
+    <div className="rounded-xl border bg-card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs text-muted-foreground">{row.dimension}</p>
+          <p className="mt-1 font-semibold">{row.name}</p>
+        </div>
+        <span className="rounded-full border px-2 py-1 text-[11px] text-muted-foreground">{row.confidence}</span>
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-3 text-xs">
+        <div><p className="text-muted-foreground">Публикации</p><p className="mt-1 font-semibold tabular-nums">{row.publications}</p></div>
+        <div><p className="text-muted-foreground">Метрика</p><p className="mt-1 font-semibold tabular-nums">{formatLearningMetric(row.metric_value, metric)}</p></div>
+        <div><p className="text-muted-foreground">vs baseline</p><p className="mt-1 font-semibold tabular-nums">{lift}</p></div>
+      </div>
+      <p className="mt-4 text-xs font-medium">{actionLabel}</p>
+    </div>
+  );
+}
+
 export default function PerformancePage() {
   const { current } = useProject();
-  const { data, isLoading, isError, error } = useQuery({
+  const summaryQuery = useQuery({
     queryKey: ["content-performance", current?.id],
     queryFn: () => api.get<Summary>(`/performance/summary?project_id=${current?.id}`),
     enabled: Boolean(current?.id),
     refetchInterval: 15000,
   });
+  const learningQuery = useQuery({
+    queryKey: ["content-performance-learning", current?.id],
+    queryFn: () => api.get<Learning>(`/performance/learning?project_id=${current?.id}`),
+    enabled: Boolean(current?.id),
+    refetchInterval: 15000,
+  });
 
+  const data = summaryQuery.data;
+  const learning = learningQuery.data;
   const totals = data?.totals || {};
   const views = totals.views ?? totals.impressions ?? 0;
   const clicks = totals.clicks ?? 0;
@@ -77,12 +145,12 @@ export default function PerformancePage() {
       <div>
         <div className="flex items-center gap-2 text-sm font-medium text-primary"><BarChart3 className="h-4 w-4" /> Performance learning loop</div>
         <h1 className="mt-1 text-3xl font-bold tracking-tight">Что реально работает после публикации</h1>
-        <p className="mt-2 max-w-3xl text-sm text-muted-foreground">Autoposter возвращает snapshots публикаций. Factory берёт только последний snapshot каждой публикации, поэтому повторные обновления метрик не раздувают totals. Эти данные связываются с форматом и рубрикой.</p>
+        <p className="mt-2 max-w-3xl text-sm text-muted-foreground">Autoposter возвращает snapshots публикаций. Factory берёт только последний snapshot каждой публикации, связывает результат с форматом и рубрикой и использует историю как осторожный prior для следующих batch-планов.</p>
       </div>
 
       {!current && <div className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">Выберите проект.</div>}
-      {isLoading && current && <p className="text-sm text-muted-foreground">Загружаю performance…</p>}
-      {isError && <p className="text-sm text-red-600">Не удалось загрузить performance: {(error as Error).message}</p>}
+      {summaryQuery.isLoading && current && <p className="text-sm text-muted-foreground">Загружаю performance…</p>}
+      {summaryQuery.isError && <p className="text-sm text-red-600">Не удалось загрузить performance: {(summaryQuery.error as Error).message}</p>}
 
       {current && data && (
         <>
@@ -98,6 +166,49 @@ export default function PerformancePage() {
             <Card><CardContent className="p-5"><p className="text-xs text-muted-foreground">CTR</p><p className="mt-2 text-3xl font-bold">{ctr}%</p><p className="mt-2 text-xs text-muted-foreground">clicks / views</p></CardContent></Card>
             <Card><CardContent className="p-5"><p className="text-xs text-muted-foreground">Click → lead</p><p className="mt-2 text-3xl font-bold">{leadRate}%</p><p className="mt-2 text-xs text-muted-foreground">leads / clicks</p></CardContent></Card>
           </div>
+
+          {learning && (
+            <Card>
+              <CardHeader>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-2"><BrainCircuit className="h-5 w-5" /><CardTitle>Learning policy</CardTitle></div>
+                    <p className="mt-2 text-sm text-muted-foreground">Primary signal: {learning.primary_metric_label || learning.primary_metric}. Baseline: {formatLearningMetric(learning.baseline, learning.primary_metric)}.</p>
+                  </div>
+                  <div className="rounded-full border px-3 py-1 text-xs text-muted-foreground">{learning.status}</div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-5">
+                {learning.status === "insufficient_data" && (
+                  <div className="flex gap-3 rounded-xl border border-dashed p-4 text-sm"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><div><p className="font-medium">Система пока не оптимизирует контент по истории</p><p className="mt-1 text-muted-foreground">Маленькая выборка слишком легко создаёт ложного «победителя». До sample gate новые batch-планы остаются исследовательскими.</p></div></div>
+                )}
+                {learning.status === "learning" && (
+                  <div className="flex gap-3 rounded-xl border p-4 text-sm"><FlaskConical className="mt-0.5 h-4 w-4 shrink-0" /><div><p className="font-medium">Exploration защищён</p><p className="mt-1 text-muted-foreground">Минимум {Math.round(learning.exploration_share * 100)}% будущего batch остаётся под новые гипотезы. История влияет на allocation, но не блокирует discovery.</p></div></div>
+                )}
+
+                {!!learning.recommendations.guidance.length && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Рекомендации</p>
+                    {learning.recommendations.guidance.map((line) => <div key={line} className="rounded-lg bg-muted/40 px-3 py-2 text-sm">{line}</div>)}
+                  </div>
+                )}
+
+                {!!learning.recommendations.winners.length && (
+                  <div className="space-y-3">
+                    <p className="text-sm font-semibold">Кандидаты на осторожное масштабирование</p>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{learning.recommendations.winners.map((row) => <LearningCard key={`${row.dimension}-${row.name}`} row={row} metric={learning.primary_metric} />)}</div>
+                  </div>
+                )}
+
+                {!!learning.recommendations.watch.length && (
+                  <div className="space-y-3">
+                    <p className="text-sm font-semibold">Нужен другой angle перед повтором</p>
+                    <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">{learning.recommendations.watch.map((row) => <LearningCard key={`${row.dimension}-${row.name}`} row={row} metric={learning.primary_metric} />)}</div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Breakdown title="По формату" rows={data.by_content_type || {}} />
           <Breakdown title="По рубрике" rows={data.by_rubric || {}} />
