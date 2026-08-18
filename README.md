@@ -1,372 +1,199 @@
-# Content Factory
+# Qualive Content Factory
 
-Content Factory is an AI production system that turns a high-level content task into a reviewed, versioned, platform-adapted content package ready for the separate Autoposter application.
+AI production system for strategy, grounded content generation, human review, media QA, Autoposter handoff and downstream learning.
 
-This repository is the refactored successor of Agency OS. CRM, lead processing, AI consultation and reporting are no longer part of the product runtime.
+The product is deliberately split into two services:
+
+- **Content Factory** decides **what should be published**.
+- **Autoposter** owns platform rendering, scheduling, durable media and publication.
+
+The operating loop is:
+
+`Brand Brain + Project Knowledge → Strategy → Production → QA → Review → Autoposter → Performance → Learning → Better Production`
 
 ## Product workspaces
 
-- **Brand Brain** — positioning, audience, products, tone of voice, mandatory rules and forbidden claims.
-- **Strategy & Rubrics** — AI-generated reusable content lanes with critic/revision, audience-stage rationale and generation lineage.
-- **Factory** — high-level task launcher and live production pipeline.
-- **Content Review** — canonical copy, versions, quality scores, research sources, platform variants, media and human approval/regeneration.
-- **Autoposter Outbox** — validated `content-package/1.0` deliveries with Send/Retry.
+- **Factory** — one-off production runs from a high-level objective.
+- **Batches** — validated multi-item plans with exact content mix and independent child runs.
+- **Brand Brain** — positioning, audience, products, tone, rules and forbidden claims.
+- **Knowledge Base** — project-isolated first-party RAG with bounded uploads, dedupe, archive/restore and retrieval lineage.
+- **Strategy & Rubrics** — AI-generated reusable content lanes with critic/revision.
+- **Content Review** — canonical content, immutable versions, QA, evidence, variants, media and structured review decisions.
+- **Autoposter Outbox** — strict `content-package/1.0` deliveries with idempotent retry.
+- **Performance** — downstream outcomes, performance-informed planning and generation economics.
+- **Model Router** — shadow/live evidence and conservative per-stage model selection.
 
-## Product boundary
+## Production pipeline
 
-Content Factory owns **what should be published**:
+`Project Knowledge → optional live research → typed draft → evaluate/revise → humanize → platform adaptation → image generation → vision QA → final QA / human review → content-package/1.0 → Autoposter`
 
-- brand context and rules;
-- content strategy and reusable rubrics;
-- research and source provenance;
-- canonical content generation;
-- critic / quality evaluation;
-- revision loops;
-- humanization;
-- platform variants;
-- visual generation and visual QA;
-- immutable version history;
-- export package validation;
-- handoff to Autoposter.
+Every meaningful stage is persisted. Provider failures never masquerade as success.
 
-Autoposter owns **how and when it is technically published**:
+## First-party Knowledge / RAG
 
-- platform credentials;
-- platform-specific rendering;
-- scheduling;
-- API delivery to Telegram / VK / Instagram / Dzen / other destinations;
-- publication status and delivery retries on the platform side.
+Knowledge documents are project-isolated and split into searchable chunks. The first version uses PostgreSQL full-text search and GIN indexes instead of introducing a separate vector service prematurely.
 
-## Production flow
+Supported bounded ingestion includes TXT, Markdown, JSON, PDF and DOCX. Private Knowledge references are available to internal review/audit but are deliberately excluded from the external Autoposter package.
 
-```text
-High-level task
-    ↓
-Brand Brain
-    ↓
-Live research (optional)
-    ↓
-Canonical draft
-    ↓
-Quality evaluation
-    ↓
-Revision loop (threshold-based)
-    ↓
-Humanize
-    ↓
-Platform variants
-    ↓
-Image generation
-    ↓
-Vision QA / regeneration loop
-    ↓
-Final QA / human review when required
-    ↓
-content-package/1.0
-    ↓
-Autoposter Outbox
-    ↓
-Autoposter
-```
+## Typed content contracts
 
-The pipeline is intentionally deterministic rather than a swarm of opaque autonomous agents. Every significant stage is persisted so failures can be inspected, retried and measured.
+The factory does not treat every format as the same generic text prompt.
 
-## Strategy flow
+- **Post** — hook, body, CTA and takeaways.
+- **Article** — outline, body, metadata, SEO and FAQ.
+- **Commercial proposal** — recipient context, problem, desired outcome, solution, scope, deliverables, process, assumptions/risks and next step. Pricing is never invented.
+- **Carousel** — coherent multi-slide narrative and visual ideas.
+- **Video script** — duration, scenes, voiceover/on-screen copy and editing instructions.
 
-Rubric generation is a separate strategy workflow:
+Contract errors are fed back into revision and block auto-approval.
 
-```text
-Brand Brain + strategy goal
-    ↓
-Optional live research
-    ↓
-Rubric system generation
-    ↓
-Strategy critic
-    ↓
-Revision when overlap / coverage / actionability are weak
-    ↓
-Quality gate
-    ↓
-Activate new AI rubric set
-```
+## Performance learning
 
-Older AI rubric sets are deactivated rather than deleted, preserving lineage for the future performance-learning loop.
+Autoposter sends idempotent metric snapshots back to Factory. Only the newest snapshot per downstream publication contributes to current totals, so periodic snapshots are not double-counted.
 
-## Architecture
+Historical performance is a **prior**, not automatic truth:
 
-```text
-apps/web       Next.js strategy, factory, review and outbox UI
-apps/api       FastAPI auth, projects and Content Factory APIs
-apps/worker    Celery production / review / strategy pipelines
-packages/database
-               SQLAlchemy models + Alembic migrations
-PostgreSQL     content, versions, sources, evaluations, runs and export state
-Redis          Celery broker
-MinIO / S3     private generated media assets
-Tavily         optional live research provider
-LLM endpoint   OpenAI-compatible text + vision endpoint
-Image endpoint OpenAI-compatible image generation endpoint
-Autoposter     separate application accepting content-package/1.0
-```
+- outcome priority is conversions → leads → clicks → views;
+- recommendations are sample-gated;
+- rubrics, content types and platforms are compared against project baseline;
+- performance-informed Batches retain at least **25% exploration**;
+- the exploration floor is enforced deterministically, not only through prompt wording;
+- every planned item records `exploit` or `explore` lineage.
 
-## Core data model
+## Human review data
 
-- `Project` — isolated content workspace.
-- `BrandProfile` — positioning, audience, products, tone of voice, brand rules and forbidden claims.
-- `Rubric` — reusable content category with AI/manual origin and generation lineage.
-- `GenerationRun` — one high-level production or strategy job.
-- `GenerationStep` — persisted trace of each pipeline stage.
-- `ContentItem` — current canonical content representation plus research provenance.
-- `ContentVersion` — immutable history of AI and human revisions.
-- `ContentVariant` — adapted copy for a specific destination platform.
-- `Evaluation` — structured quality scores and review notes.
-- `MediaAsset` — generated visual stored outside PostgreSQL.
-- `ExportDelivery` — validated package and Autoposter delivery state.
+Review decisions are structured training/evaluation signals, not just UI button clicks. The system stores the exact content version, reviewer, action, reason codes and optional note.
 
-Legacy Agency OS tables are intentionally not dropped yet. They are no longer mounted in the runtime and may be removed with a destructive cleanup migration only after the new deployment is verified.
+Examples of reason codes include weak hook, generic AI style, off-brand language, unsupported claim and excessive sales pressure.
 
-## Quality gates
+## Generation economics
 
-The default text thresholds are configurable:
+Provider telemetry is stored in `GenerationStep` traces:
+
+- provider and model;
+- input/output/total tokens when available;
+- request latency;
+- estimated cost only when operator-configured pricing exists.
+
+The application does **not** hard-code vendor pricing. Unknown prices remain visible as unpriced requests instead of being treated as free.
+
+Default-model rates can be configured with:
 
 ```env
-QUALITY_THRESHOLD=0.87
-FACTUALITY_THRESHOLD=0.95
-BRAND_VOICE_THRESHOLD=0.85
-MAX_REVISION_ATTEMPTS=2
+LLM_INPUT_COST_PER_1M_USD=0
+LLM_OUTPUT_COST_PER_1M_USD=0
 ```
 
-Content that cannot reach the thresholds is routed to review instead of being silently approved. Human approval overrides the canonical-copy gate, but does **not** bypass platform adaptation, media QA or package validation.
-
-Visuals use their own quality threshold and retry budget:
+Per-model rates for Model Router candidates use:
 
 ```env
-MEDIA_QUALITY_THRESHOLD=0.86
-MAX_IMAGE_ATTEMPTS=2
+LLM_MODEL_PRICING_JSON={}
 ```
 
-If image generation, vision QA or object storage is unavailable, the pipeline does not fake success; the item stops for review.
+## Conservative Model Router
 
-## Research provenance
+Model Router is intentionally staged to avoid switching production traffic from weak or non-causal evidence.
 
-Live research is optional per generation run. When enabled and configured, the worker stores source title, URL, snippet and relevance score with the canonical content and exports source metadata in the final content package.
+### 1. Shadow evidence
 
-If the research provider is not configured, the stage is persisted as `skipped`. No synthetic URLs or fake search results are generated.
+Default mode:
 
-## Private media storage
+```env
+MODEL_ROUTER_MODE=shadow
+```
 
-Generated image bytes are never stored in PostgreSQL. Accepted media is uploaded to a private S3-compatible object store.
+Production output always comes from the default model. On a small, retry-stable sample of run/stage families, Factory also calls one under-sampled candidate in parallel. A blinded A/B judge compares the control and candidate.
 
-Local Docker Compose includes MinIO:
+Candidate output is **never** used downstream. The trace keeps only compact hashes, quality scores and provider telemetry rather than storing a second unpublished content body.
 
-- S3 API: `http://localhost:9000`
-- MinIO console: `http://localhost:9001`
-- private bucket: `content-assets`
+### 2. Controlled live exploration
 
-By default Content Factory returns time-limited presigned media URLs. Configure `S3_PUBLIC_ENDPOINT_URL` with the address that browsers/Autoposter can reach. `S3_PUBLIC_BASE_URL` should only be set deliberately when using a public CDN origin.
+A candidate must first clear total-sample and quality gates before it is even allowed to receive the small live exploration share in `active` mode.
 
-Autoposter should ingest/copy media during package acceptance instead of treating a presigned URL as a permanent publication asset.
+```env
+MODEL_ROUTER_MIN_SAMPLES_PER_MODEL=10
+MODEL_ROUTER_QUALITY_FLOOR=0.84
+MODEL_ROUTER_EXPLORATION_RATE=0.10
+```
+
+### 3. Full production routing
+
+A candidate cannot become the full-routing winner merely because an offline judge likes it.
+
+For content-producing stages (`draft`, `evaluate`, `revise`, `humanize`, `adapt`) it also needs live use **and real downstream performance snapshots**:
+
+```env
+MODEL_ROUTER_MIN_LIVE_SAMPLES=3
+MODEL_ROUTER_MIN_DOWNSTREAM_SAMPLES=3
+```
+
+Strategy and batch-planning stages do not pretend to have direct publication-level causal attribution; they retain quality/live gates without manufacturing a false downstream relationship.
+
+The Model Router UI separately displays shadow samples, live samples, shadow leader, live recommendation and production eligibility.
+
+## Media
+
+Generated media is reviewed before acceptance and stored in S3-compatible object storage. Local development uses MinIO. Buckets are private by default and delivery URLs are presigned unless a deliberate public CDN is configured.
+
+Autoposter copies accepted media into its own storage boundary, so publication does not depend on an expiring Factory URL.
 
 ## Autoposter contract
 
-Content Factory validates every outgoing payload against `content-package/1.0` before it is persisted to the Outbox.
+Factory exports strict `content-package/1.0` payloads. Delivery is delivery-scoped and idempotent.
 
-Example shape:
+The separate Autoposter bridge owns:
 
-```json
-{
-  "schema_version": "content-package/1.0",
-  "content_id": "...",
-  "project_id": "...",
-  "status": "approved",
-  "canonical": {
-    "content_type": "post",
-    "topic": "...",
-    "goal": "...",
-    "title": "...",
-    "body": "...",
-    "hook": "...",
-    "cta": "..."
-  },
-  "variants": [
-    {
-      "platform": "telegram",
-      "plain_text": "...",
-      "hashtags": [],
-      "blocks": [],
-      "media": []
-    }
-  ],
-  "sources": [],
-  "quality": {
-    "overall": 0.94,
-    "factuality": 0.98,
-    "brand_voice": 0.91,
-    "media": 0.93
-  }
-}
-```
+- package ingestion;
+- workspace mapping;
+- durable media copying;
+- platform rendering/scheduling;
+- publication;
+- analytics feedback.
 
-Manual and retry deliveries use an `Idempotency-Key` header. Autoposter should persist and enforce this key so retries cannot create duplicate publications.
+Use `scripts/bridge-smoke.py` to validate acceptance/replay/conflict semantics without spending LLM credits.
 
-## API
+## Reliability boundaries
 
-Main Content Factory endpoints:
+- PostgreSQL state is committed before broker dispatch.
+- A durable task outbox closes the DB → Redis/Celery gap.
+- Provider failures are explicit.
+- Manual edits create immutable versions.
+- Private Knowledge lineage does not leave Factory packages.
+- Performance ingestion is disabled until an explicit shared token is configured.
+- Model Router fails open to the default model.
+- Shadow candidate failures never replace or fail an otherwise successful production response.
 
-```text
-GET  /factory/capabilities
-POST /factory/runs
-GET  /factory/runs
-GET  /factory/runs/{run_id}
-GET  /factory/content/{content_id}/detail
-POST /factory/content/{content_id}/approve
-POST /factory/content/{content_id}/regenerate
-
-GET  /factory/brand/{project_id}
-PUT  /factory/brand/{project_id}
-
-POST /strategy/rubrics/generate
-GET  /strategy/rubrics?project_id=...
-POST /strategy/rubrics/{rubric_id}/archive
-
-GET  /factory/outbox?project_id=...
-POST /factory/outbox/{delivery_id}/send
-```
-
-API docs are available at `/docs` when the API is running.
-
-## Environment
-
-Create the local environment file:
+## Local start
 
 ```bash
 cp .env.example .env
+docker compose up -d --build
 ```
 
-At minimum, configure the text model:
+Then open the configured Next.js frontend and API docs.
 
-```env
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=...
-LLM_MODEL=...
-```
+Before unattended publishing or active model routing, complete the real deployment acceptance checklist in the verified bundle `DEPLOY.md`.
 
-Optional live research:
+## Validation
 
-```env
-TAVILY_API_KEY=...
-```
-
-Image generation:
-
-```env
-IMAGE_API_URL=...
-IMAGE_API_KEY=...
-IMAGE_MODEL=...
-```
-
-Private object storage uses the `S3_*` variables documented in `.env.example`.
-
-Autoposter handoff:
-
-```env
-AUTOPOSTER_URL=...
-AUTOPOSTER_TOKEN=...
-```
-
-## Local Docker run
-
-Prerequisites:
-
-- Docker Engine / Docker Desktop;
-- Docker Compose v2.
-
-Start the stack:
-
-```bash
-cp .env.example .env
-docker compose up --build
-```
-
-Services:
-
-```text
-Web             http://localhost:3010
-API             http://localhost:8010
-API docs        http://localhost:8010/docs
-PostgreSQL      localhost:5433
-Redis           localhost:6380
-MinIO S3        http://localhost:9000
-MinIO console   http://localhost:9001
-```
-
-Database migrations are run by the `migrate` service before API/worker startup.
-
-Stop:
-
-```bash
-docker compose down
-```
-
-Delete local data as well:
-
-```bash
-docker compose down -v
-```
-
-## Worker
-
-Celery task families:
-
-```text
-content_factory.process_run
-content_factory.approve_content
-content_factory.generate_rubrics
-content_factory.send_delivery
-```
-
-## CI
-
-`.github/workflows/ci.yml` validates:
+PR CI covers:
 
 - Python compilation;
-- API/worker/strategy task imports;
-- Alembic migrations against a real PostgreSQL 15 service;
-- Content Package contract tests;
-- provider fallback safety tests;
+- Alembic migrations on PostgreSQL;
+- API and worker imports/tests;
+- Knowledge isolation/retrieval;
+- content-package and typed-format contracts;
+- task outbox behavior;
+- performance snapshot dedupe and learning policy;
+- generation economics;
+- Model Router policy, shadow/live evidence and downstream gates;
 - Next.js production build;
-- Docker Compose configuration.
+- Docker Compose contract.
 
-Real model/image/research/Autoposter E2E tests require credentials and should be protected deployment checks rather than exposing production keys to ordinary pull-request jobs.
+## Product moat
 
-## Deployment acceptance checklist
+The long-term advantage is not another generic agent UI. It is the accumulated closed-loop dataset:
 
-Before merging/deploying a Content Factory release, verify:
+`first-party knowledge + strategy lineage + prompt/model/stage lineage + immutable versions + human decisions + provider economics + downstream outcomes`
 
-1. CI is green.
-2. Alembic upgrades cleanly on a copy of the target database.
-3. `GET /factory/capabilities` shows expected providers as ready.
-4. A test project has a complete `BrandProfile`.
-5. AI Rubrics generate and the accepted set becomes active.
-6. One production run completes from task → ready content.
-7. Research sources are visible in persisted content when research is enabled.
-8. Generated media resolves through the configured presigned/public asset origin.
-9. Human approval continues through adaptation/media/package rather than skipping downstream checks.
-10. Outbox payload validates as `content-package/1.0`.
-11. Autoposter accepts the package and returns an external identifier.
-12. Re-sending the same delivery does not create a duplicate on the Autoposter side.
-
-## Next product layers
-
-After this vertical production path is stable, the highest-value additions are:
-
-- Knowledge Base / RAG from project files and approved materials;
-- AI-generated content plans/calendar built from the active rubric system;
-- specialized generation schemas for articles, commercial proposals, posts and video scripts;
-- performance metrics returned from Autoposter;
-- feedback learning by brand, rubric, hook, format and visual style;
-- measured model/prompt routing by quality, latency and cost;
-- transactional queue outbox so DB commits and Celery dispatch cannot diverge.
-
-The long-term moat is the closed learning loop: brand/strategy decisions + generation lineage + version history + source provenance + human feedback + downstream performance.
+That dataset allows the system to learn **what content production decision is most likely to produce the desired business action, at what cost, and with what confidence**.
