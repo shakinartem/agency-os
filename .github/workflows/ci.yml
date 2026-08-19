@@ -61,6 +61,7 @@ jobs:
           python -c "from apps.worker.tasks.delivery_tasks import send_delivery_v2; assert send_delivery_v2.name == 'content_factory.send_delivery_v2'"
           python -c "from apps.worker.tasks.dispatch_tasks import dispatch_task_outbox, execute_outbox_task; assert dispatch_task_outbox.name == 'content_factory.dispatch_task_outbox'; assert execute_outbox_task.name == 'content_factory.execute_outbox_task'"
           python -c "from apps.worker.tasks import model_router_runtime; assert model_router_runtime.routed_chat_json; print('model router runtime installed')"
+          python -c "from apps.worker.tasks import prompt_experiment_runtime; assert prompt_experiment_runtime.experiment_chat_json; print('prompt experiment runtime installed')"
       - name: Run API tests
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api

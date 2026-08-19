@@ -33,6 +33,7 @@ from .content_factory import (
 )
 from .knowledge import KnowledgeDocument, KnowledgeChunk
 from .model_router_snapshot import ModelRouterSnapshot
+from .prompt_experiment import PromptExperiment, PromptExperimentArm, PromptExperimentObservation
 
 
 def _strip_internal_provider_meta(value):
@@ -63,5 +64,6 @@ __all__ = [
     "GenerationStep", "ContentVersion", "ContentVariant", "Evaluation", "MediaAsset",
     "ExportDelivery", "ProductionBatch", "ProductionBatchItem", "ReviewDecision",
     "PerformanceSnapshot", "TaskOutbox", "KnowledgeDocument", "KnowledgeChunk",
-    "ModelRouterSnapshot",
+    "ModelRouterSnapshot", "PromptExperiment", "PromptExperimentArm",
+    "PromptExperimentObservation",
 ]
