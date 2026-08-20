@@ -3,12 +3,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.enums import UserRole
-from database.models import User
+from database.models import AuthSession, User
 
+from ..audit import record_audit
 from ..auth import hash_password
 from ..database import get_db
 from ..dependencies import get_current_user, require_role
@@ -43,9 +44,9 @@ async def get_user(
 async def create_user(
     body: UserCreate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    current_user: User = Depends(require_role(UserRole.admin)),
 ):
-    existing = await db.execute(select(User).where(User.email == body.email))
+    existing = await db.execute(select(User).where(func.lower(User.email) == str(body.email).lower()))
     if existing.scalar_one_or_none():
         raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already taken")
 
@@ -58,6 +59,7 @@ async def create_user(
     )
     db.add(user)
     await db.flush()
+    await record_audit(db, actor=current_user, action="user.create", entity_type="user", entity_id=user.id, metadata={"role": user.role.value})
     await db.refresh(user)
     return user
 
@@ -67,14 +69,21 @@ async def update_user(
     user_id: uuid.UUID,
     body: UserUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    current_user: User = Depends(require_role(UserRole.admin)),
 ):
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    if user.role == UserRole.admin and (body.role is not None and body.role != "admin" or body.is_active is False):
+        active_admins = (await db.execute(select(User.id).where(User.role == UserRole.admin, User.is_active.is_(True)))).scalars().all()
+        if len(active_admins) <= 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Cannot demote or disable the last active admin")
     if body.email is not None:
+        duplicate = await db.scalar(select(User.id).where(func.lower(User.email) == str(body.email).lower(), User.id != user.id))
+        if duplicate is not None:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Email already taken")
         user.email = body.email
     if body.name is not None:
         user.name = body.name
@@ -84,7 +93,10 @@ async def update_user(
         user.is_active = body.is_active
     if body.password is not None:
         user.password_hash = hash_password(body.password)
+        # A password reset invalidates every existing browser/API session for the account.
+        await db.execute(delete(AuthSession).where(AuthSession.user_id == user.id))
 
+    await record_audit(db, actor=current_user, action="user.update", entity_type="user", entity_id=user.id, metadata={"fields": sorted(body.model_dump(exclude_unset=True))})
     await db.flush()
     await db.refresh(user)
     return user
@@ -94,10 +106,17 @@ async def update_user(
 async def delete_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    current_user: User = Depends(require_role(UserRole.admin)),
 ):
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found")
+    if user.id == current_user.id:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail="Cannot delete the currently authenticated admin")
+    if user.role == UserRole.admin and user.is_active:
+        active_admins = (await db.execute(select(User.id).where(User.role == UserRole.admin, User.is_active.is_(True)))).scalars().all()
+        if len(active_admins) <= 1:
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Cannot delete the last active admin")
+    await record_audit(db, actor=current_user, action="user.delete", entity_type="user", entity_id=user.id)
     await db.delete(user)

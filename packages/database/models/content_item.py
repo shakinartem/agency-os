@@ -1,9 +1,9 @@
-"""ContentItem model — content pieces (posts, articles, videos…)."""
+"""Content item — canonical content produced by the factory."""
 
 import uuid
 
-from sqlalchemy import ForeignKey, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..base import Base
@@ -15,22 +15,34 @@ from ._types import enum_type
 class ContentItem(Base, TimestampMixin):
     __tablename__ = "content_items"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False,
+        UUID(as_uuid=True), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True,
     )
-    type: Mapped[ContentType] = mapped_column(
-        enum_type(ContentType), default=ContentType.post, nullable=False,
-    )
+    type: Mapped[ContentType] = mapped_column(enum_type(ContentType), default=ContentType.post, nullable=False)
     status: Mapped[ContentStatus] = mapped_column(
         enum_type(ContentStatus), default=ContentStatus.draft, nullable=False, index=True,
     )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # relationships
+    # Content Factory fields. Every rewrite is appended to content_versions while these
+    # columns point at the current best canonical version.
+    task: Mapped[str | None] = mapped_column(Text, nullable=True)
+    topic: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    goal: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    hook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cta: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hashtags: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    platforms: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    visual_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    structured_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True, default=dict)
+    research_sources: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    # Internal lineage only: these references must not be exported to public platform payloads.
+    knowledge_refs: Mapped[list | None] = mapped_column(JSONB, nullable=True, default=list)
+    quality_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
     project = relationship("Project", back_populates="content_items")
     publications = relationship("Publication", back_populates="content_item")
 

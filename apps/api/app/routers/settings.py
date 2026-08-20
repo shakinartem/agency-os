@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.enums import UserRole
 from database.models import SystemSetting, User
 
+from ..audit import record_audit
 from ..database import get_db
 from ..dependencies import get_current_user, require_role
 from ..schemas.settings import SystemSettingCreate, SystemSettingRead, SystemSettingUpdate
@@ -43,7 +44,7 @@ async def upsert_setting(
     key: str,
     body: SystemSettingUpdate,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    user: User = Depends(require_role(UserRole.admin)),
 ):
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
@@ -53,6 +54,7 @@ async def upsert_setting(
         setting = SystemSetting(key=key, value=body.value)
         db.add(setting)
     await db.flush()
+    await record_audit(db, actor=user, action="setting.upsert", entity_type="system_setting", entity_id=key)
     await db.refresh(setting)
     return setting
 
@@ -61,10 +63,11 @@ async def upsert_setting(
 async def delete_setting(
     key: str,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(require_role(UserRole.admin)),
+    user: User = Depends(require_role(UserRole.admin)),
 ):
     result = await db.execute(select(SystemSetting).where(SystemSetting.key == key))
     setting = result.scalar_one_or_none()
     if not setting:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Setting not found")
+    await record_audit(db, actor=user, action="setting.delete", entity_type="system_setting", entity_id=key)
     await db.delete(setting)

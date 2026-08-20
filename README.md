@@ -1,395 +1,199 @@
-# Agency OS
+# Qualive Content Factory
 
-**Agency OS** is a unified orchestration platform that connects, normalises, and manages five existing AI/automation bots under a single web interface and API.
+AI production system for strategy, grounded content generation, human review, media QA, Autoposter handoff and downstream learning.
 
-Instead of running five separate scripts, admins get one dashboard to manage projects, leads, content, publishing, and reports across all bots.
+The product is deliberately split into two services:
 
----
+- **Content Factory** decides **what should be published**.
+- **Autoposter** owns platform rendering, scheduling, durable media and publication.
 
-## What is Agency OS?
+The operating loop is:
 
-Agency OS acts as the central brain over five independent repositories:
+`Brand Brain + Project Knowledge → Strategy → Production → QA → Review → Autoposter → Performance → Learning → Better Production`
 
-1. **[bot1_crm](https://github.com/shakinartem/bot1_crm)** — Telegram CRM bot (lead capture & management)
-2. **[bot2_consultation_ai](https://github.com/shakinartem/bot2_consultation_ai)** — AI consultation engine (chat + intent detection)
-3. **[bot3_content_farm](https://github.com/shakinartem/bot3_content_farm)** — AI content generation (posts, articles, scripts)
-4. **[autoposter_bot](https://github.com/shakinartem/autoposter_bot)** — Cross-platform auto-publisher (Telegram, Instagram, Facebook, VK)
-5. **[bot5_otchet](https://github.com/shakinartem/bot5_otchet)** — Reporting & analytics bot
+## Product workspaces
 
-Agency OS provides:
-- A **shared database** (projects, leads, conversations, content, publications, reports, integrations)
-- A **REST API** (FastAPI) with JWT auth + role-based access
-- A **web dashboard** (Next.js) for non-technical users
-- **Integration adapters** that translate between each bot & the core schema
-- **Scheduled background tasks** (Celery) for sync, push, and reporting
+- **Factory** — one-off production runs from a high-level objective.
+- **Batches** — validated multi-item plans with exact content mix and independent child runs.
+- **Brand Brain** — positioning, audience, products, tone, rules and forbidden claims.
+- **Knowledge Base** — project-isolated first-party RAG with bounded uploads, dedupe, archive/restore and retrieval lineage.
+- **Strategy & Rubrics** — AI-generated reusable content lanes with critic/revision.
+- **Content Review** — canonical content, immutable versions, QA, evidence, variants, media and structured review decisions.
+- **Autoposter Outbox** — strict `content-package/1.0` deliveries with idempotent retry.
+- **Performance** — downstream outcomes, performance-informed planning and generation economics.
+- **Model Router** — shadow/live evidence and conservative per-stage model selection.
 
----
+## Production pipeline
 
-## Integrated Repositories
+`Project Knowledge → optional live research → typed draft → evaluate/revise → humanize → platform adaptation → image generation → vision QA → final QA / human review → content-package/1.0 → Autoposter`
 
-| # | Bot | GitHub | Role in Agency OS |
-|---|-----|--------|-------------------|
-| 1 | bot1_crm | [shakinartem/bot1_crm](https://github.com/shakinartem/bot1_crm) | Lead & contact sync |
-| 2 | bot2_consultation_ai | [shakinartem/bot2_consultation_ai](https://github.com/shakinartem/bot2_consultation_ai) | AI dialogs & intent |
-| 3 | bot3_content_farm | [shakinartem/bot3_content_farm](https://github.com/shakinartem/bot3_content_farm) | Content generation |
-| 4 | autoposter_bot | [shakinartem/autoposter_bot](https://github.com/shakinartem/autoposter_bot) | Publishing scheduler |
-| 5 | bot5_otchet | [shakinartem/bot5_otchet](https://github.com/shakinartem/bot5_otchet) | Reports & analytics |
+Every meaningful stage is persisted. Provider failures never masquerade as success.
 
----
+## First-party Knowledge / RAG
 
-## Architecture (text diagram)
+Knowledge documents are project-isolated and split into searchable chunks. The first version uses PostgreSQL full-text search and GIN indexes instead of introducing a separate vector service prematurely.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Agency OS Monorepo                        │
-├────────────────┬────────────────┬───────────────────────────────┤
-│   Frontend     │   Backend      │   Background                  │
-│   Next.js 14   │   FastAPI      │   Celery Worker               │
-│   + React Query│   + SQLAlchemy │   + Redis Broker              │
-│   + shadcn/ui  │   + Alembic    │                               │
-└────────┬───────┴───────┬────────┴───────────┬───────────────────┘
-         │               │                     │
-         ▼               ▼                     ▼
-   ┌─────────┐   ┌──────────┐   ┌──────────────────────┐
-   │ Nginx / │   │ Postgres │   │ Redis                │
-   │ Traefik │   │ 15       │   │ 7 (celery broker)    │
-   └─────────┘   └──────────┘   └──────────────────────┘
-         │
-         ▼
-┌────────────────────────────────────────────────────────┐
-│                   Adapter Layer                        │
-│  integrations/crm  ──► CRMIntegration                   │
-│  integrations/consultation  ──► ConsultationIntegration │
-│  integrations/content  ──► ContentFarmIntegration       │
-│  integrations/autoposter  ──► AutoposterIntegration     │
-│  integrations/reports  ──► ReportsIntegration           │
-└──────────────────────┬─────────────────────────────────┘
-                       │ HTTP / Webhook
-                       ▼
-   ┌───────────────┬───────────────┬───────────────┬───────────────┬───────────────┐
-   │  bot1_crm     │bot2_consultation│bot3_content   │autoposter_bot │bot5_otchet     │
-   │  (Telegram)   │  (AI chat)      │_farm (AI)     │ (multi-platform│ (reports)      │
-   └───────────────┴───────────────┴───────────────┴───────────────┴───────────────┘
-```
+Supported bounded ingestion includes TXT, Markdown, JSON, PDF and DOCX. Private Knowledge references are available to internal review/audit but are deliberately excluded from the external Autoposter package.
 
-**Data flow:**
+## Typed content contracts
 
-1. Each bot pushes/pulls data via its adapter (`pull()` / `push()`)
-2. Adapters normalize raw bot formats into core ORM models
-3. Workers run on schedule or on-demand (manual sync button in UI)
-4. Frontend reads/writes via FastAPI REST endpoints
-5. All state is persisted in Postgres; async tasks use Redis + Celery
+The factory does not treat every format as the same generic text prompt.
 
----
+- **Post** — hook, body, CTA and takeaways.
+- **Article** — outline, body, metadata, SEO and FAQ.
+- **Commercial proposal** — recipient context, problem, desired outcome, solution, scope, deliverables, process, assumptions/risks and next step. Pricing is never invented.
+- **Carousel** — coherent multi-slide narrative and visual ideas.
+- **Video script** — duration, scenes, voiceover/on-screen copy and editing instructions.
 
-## Project Structure
+Contract errors are fed back into revision and block auto-approval.
 
-```
-agency-os/
-├── apps/
-│   ├── web/                  # Next.js 14 frontend
-│   │   ├── src/app/
-│   │   │   ├── (dashboard)/
-│   │   │   │   ├── layout.tsx        # Protected shell
-│   │   │   │   ├── dashboard/page.tsx
-│   │   │   │   ├── clinics/page.tsx
-│   │   │   │   ├── crm/page.tsx
-│   │   │   │   ├── dialogs/page.tsx
-│   │   │   │   ├── content/page.tsx
-│   │   │   │   ├── publishing/page.tsx
-│   │   │   │   ├── reports/page.tsx
-│   │   │   │   ├── integrations/page.tsx
-│   │   │   │   ├── users/page.tsx
-│   │   │   │   │   └── settings/page.tsx
-│   │   │   └── login/page.tsx
-│   │   ├── src/components/
-│   │   │   ├── layout/        # Sidebar, TopBar, DashboardLayout
-│   │   │   └── ui/            # Button, Card, Badge, Input, Table, Avatar…
-│   │   ├── src/context/       # AuthContext, ProjectContext
-│   │   └── src/lib/           # api.ts (typed fetch), utils.ts (cn)
-│   │
-│   ├── api/                  # FastAPI backend
-│   │   └── app/
-│   │       ├── main.py       # CORS + all routers
-│   │       ├── config.py     # AppConfig (env)
-│   │       ├── database.py   # AsyncSession DI
-│   │       ├── auth.py       # JWT + password hashing
-│   │       ├── dependencies.py  # get_current_user, require_role
-│   │       ├── schemas/      # Pydantic request/response DTOs
-│   │       │   ├── auth, user, project, lead, conversation,
-│   │       │   ├── content, publication, report, integration, settings
-│   │       └── routers/      # Route handlers
-│   │           ├── auth, users, projects, leads, conversations,
-│   │           ├── content, publications, reports, integrations, settings
-│   │
-│   └── worker/               # Celery background worker
-│       └── tasks/worker.py   # Celery app + placeholder tasks
-│
-├── packages/
-│   ├── shared/               # Shared Python types & enums
-│   │   └── src/types.py
-│   └── database/             # SQLAlchemy ORM + Alembic
-│       ├── alembic/
-│       │   └── versions/
-│       │       ├── 0001_create_all_tables.py
-│       │       └── 0002_add_password_hash.py
-│       ├── models/           # 13 ORM models
-│       ├── enums.py
-│       ├── base.py
-│       └── config.py
-│
-├── integrations/
-│   ├── base.py               # BaseIntegration (abstract adapter)
-│   ├── crm/__init__.py       # CRMIntegration (bot1_crm)
-│   ├── consultation/__init__.py  # ConsultationIntegration (bot2)
-│   ├── content/__init__.py   # ContentFarmIntegration (bot3)
-│   ├── autoposter/__init__.py    # AutoposterIntegration
-│   └── reports/__init__.py   # ReportsIntegration (bot5)
-│
-├── docker/
-│   ├── Dockerfile.api        # Python 3.12-slim + FastAPI + Uvicorn
-│   ├── Dockerfile.web        # Node 20-alpine + Next.js
-│   └── Dockerfile.worker     # Python 3.12-slim + Celery
-│
-├── docker-compose.yml
-├── .env.example
-└── README.md
+## Performance learning
+
+Autoposter sends idempotent metric snapshots back to Factory. Only the newest snapshot per downstream publication contributes to current totals, so periodic snapshots are not double-counted.
+
+Historical performance is a **prior**, not automatic truth:
+
+- outcome priority is conversions → leads → clicks → views;
+- recommendations are sample-gated;
+- rubrics, content types and platforms are compared against project baseline;
+- performance-informed Batches retain at least **25% exploration**;
+- the exploration floor is enforced deterministically, not only through prompt wording;
+- every planned item records `exploit` or `explore` lineage.
+
+## Human review data
+
+Review decisions are structured training/evaluation signals, not just UI button clicks. The system stores the exact content version, reviewer, action, reason codes and optional note.
+
+Examples of reason codes include weak hook, generic AI style, off-brand language, unsupported claim and excessive sales pressure.
+
+## Generation economics
+
+Provider telemetry is stored in `GenerationStep` traces:
+
+- provider and model;
+- input/output/total tokens when available;
+- request latency;
+- estimated cost only when operator-configured pricing exists.
+
+The application does **not** hard-code vendor pricing. Unknown prices remain visible as unpriced requests instead of being treated as free.
+
+Default-model rates can be configured with:
+
+```env
+LLM_INPUT_COST_PER_1M_USD=0
+LLM_OUTPUT_COST_PER_1M_USD=0
 ```
 
----
+Per-model rates for Model Router candidates use:
 
-## Run Full Stack (Docker Compose)
+```env
+LLM_MODEL_PRICING_JSON={}
+```
 
-The fastest way to run the entire Agency OS stack locally.
+## Conservative Model Router
 
-### Prerequisites
+Model Router is intentionally staged to avoid switching production traffic from weak or non-causal evidence.
 
-- Docker + Docker Compose
-- At least 4 GB RAM available for Docker
+### 1. Shadow evidence
 
-### 1. Configure environment
+Default mode:
+
+```env
+MODEL_ROUTER_MODE=shadow
+```
+
+Production output always comes from the default model. On a small, retry-stable sample of run/stage families, Factory calls the default model and one under-sampled candidate **in parallel**. A blinded A/B judge compares Response A and Response B without being told which is production or candidate.
+
+Candidate output is **never** used downstream. The trace keeps only compact output hashes, quality scores and provider telemetry rather than persisting a second unpublished content body.
+
+### 2. Controlled live exploration
+
+A candidate must first clear total-sample and quality gates before it is even allowed to receive the small live exploration share in `active` mode.
+
+```env
+MODEL_ROUTER_MIN_SAMPLES_PER_MODEL=10
+MODEL_ROUTER_QUALITY_FLOOR=0.84
+MODEL_ROUTER_EXPLORATION_RATE=0.10
+```
+
+### 3. Full production routing
+
+A candidate cannot become the full-routing winner merely because an offline judge likes it.
+
+For content-producing stages (`draft`, `evaluate`, `revise`, `humanize`, `adapt`) it also needs live use **and real downstream performance snapshots**:
+
+```env
+MODEL_ROUTER_MIN_LIVE_SAMPLES=3
+MODEL_ROUTER_MIN_DOWNSTREAM_SAMPLES=3
+```
+
+Strategy and batch-planning stages do not pretend to have direct publication-level causal attribution; they retain quality/live gates without manufacturing a false downstream relationship.
+
+The Model Router UI separately displays shadow samples, live samples, shadow leader, live recommendation and production eligibility.
+
+## Media
+
+Generated media is reviewed before acceptance and stored in S3-compatible object storage. Local development uses MinIO. Buckets are private by default and delivery URLs are presigned unless a deliberate public CDN is configured.
+
+Autoposter copies accepted media into its own storage boundary, so publication does not depend on an expiring Factory URL.
+
+## Autoposter contract
+
+Factory exports strict `content-package/1.0` payloads. Delivery is delivery-scoped and idempotent.
+
+The separate Autoposter bridge owns:
+
+- package ingestion;
+- workspace mapping;
+- durable media copying;
+- platform rendering/scheduling;
+- publication;
+- analytics feedback.
+
+Use `scripts/bridge-smoke.py` to validate acceptance/replay/conflict semantics without spending LLM credits.
+
+## Reliability boundaries
+
+- PostgreSQL state is committed before broker dispatch.
+- A durable task outbox closes the DB → Redis/Celery gap.
+- Provider failures are explicit.
+- Manual edits create immutable versions.
+- Private Knowledge lineage does not leave Factory packages.
+- Performance ingestion is disabled until an explicit shared token is configured.
+- Model Router fails open to the default model.
+- Shadow candidate failures never replace or fail an otherwise successful production response.
+
+## Local start
 
 ```bash
 cp .env.example .env
+docker compose up -d --build
 ```
 
-The default values in `.env` work out of the box for a local Docker setup.
-If you need to change ports, edit:
+Then open the configured Next.js frontend and API docs.
 
-```env
-API_PORT=8010          # API port on host
-NEXT_PUBLIC_API_URL=http://localhost:8010  # Frontend -> API
-```
+Before unattended publishing or active model routing, complete the real deployment acceptance checklist in the verified bundle `DEPLOY.md`.
 
-### 2. Start everything
+## Validation
 
-```powershell
-docker compose up --build
-```
+PR CI covers:
 
-This single command will:
+- Python compilation;
+- Alembic migrations on PostgreSQL;
+- API and worker imports/tests;
+- Knowledge isolation/retrieval;
+- content-package and typed-format contracts;
+- task outbox behavior;
+- performance snapshot dedupe and learning policy;
+- generation economics;
+- Model Router policy, shadow/live evidence and downstream gates;
+- Next.js production build;
+- Docker Compose contract.
 
-1. Start **postgres** (port `5433`) and **redis** (port `6380`)
-2. Run database migrations via the `migrate` service
-3. Start **api** (port `8010`), **web** (port `3010`), and **worker**
+## Product moat
 
-### 3. Verify
+The long-term advantage is not another generic agent UI. It is the accumulated closed-loop dataset:
 
-| Service | URL |
-|---------|-----|
-| API docs | http://localhost:8010/docs |
-| API health | http://localhost:8010/health |
-| Web UI | http://localhost:3010 |
-| Postgres | `localhost:5433` (user: `agency`, db: `agency_os`) |
-| Redis | `localhost:6380` |
+`first-party knowledge + strategy lineage + prompt/model/stage lineage + immutable versions + human decisions + provider economics + downstream outcomes`
 
-Or run the included smoke-test:
-
-```powershell
-.\scripts\smoke-test.ps1
-```
-
-### 4. Stop
-
-```powershell
-docker compose down
-```
-
-To also delete the database volume (fresh start):
-
-```powershell
-docker compose down -v
-```
-
----
-
-## How to Run Locally (without Docker)
-
----
-
-## How to Configure .env
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `SECRET_KEY` | General app secret | `change-me-in-production` |
-| `JWT_SECRET` | JWT signing key | `change-me-in-production` |
-| `APP_ENV` | `development` / `production` | `development` |
-| `APP_DEBUG` | Enable debug mode | `true` |
-| `DATABASE_URL` | Postgres async DSN | `postgresql+asyncpg://agency:agency_secret@postgres:5433/agency_os` |
-| `REDIS_URL` | Redis broker URL | `redis://redis:6380/0` |
-| `API_URL` | Internal API URL (for worker) | `http://api:8010` |
-| `API_PORT` | API port mapping | `8010` |
-| `NEXT_PUBLIC_API_URL` | Frontend API URL (browser) | `http://localhost:8010` |
-| `CRM_URL` | bot1_crm base URL | *(empty = mock)* |
-| `CRM_TOKEN` | bot1_crm API token | *(empty)* |
-| `CONSULTATION_URL` | bot2_consultation_ai base URL | *(empty)* |
-| `CONSULTATION_TOKEN` | bot2 token | *(empty)* |
-| `CONTENT_URL` | bot3_content_farm base URL | *(empty)* |
-| `CONTENT_TOKEN` | bot3 token | *(empty)* |
-| `AUTOPOSTER_URL` | autoposter_bot base URL | *(empty)* |
-| `AUTOPOSTER_TOKEN` | autoposter token | *(empty)* |
-| `REPORTS_URL` | bot5_otchet base URL | *(empty)* |
-| `REPORTS_TOKEN` | bot5 token | *(empty)* |
-
----
-
-## How to Run Migrations
-
-Migrations live in `packages/database/alembic/versions/`.
-
-**Current migrations:**
-- `0001_create_all_tables.py` -- all 13 tables
-- `0002_add_password_hash.py` -- `password_hash` column on `users`
-
-### Run:
-
-```bash
-# Upgrade to latest:
-alembic upgrade head
-
-# Downgrade one step:
-alembic downgrade -1
-
-# Generate a new migration after model changes:
-alembic revision --autogenerate -m "describe change"
-```
-
-> **Note:** Alembic `env.py` is pre-configured to import all models from `packages/database/models/` so `--autogenerate` detects schema changes automatically.
-
----
-
-## How to Seed Database
-
-Seeds are stored as Python scripts in `packages/database/seeds/`.
-
-To seed:
-
-```bash
-python packages/database/seeds/run.py
-```
-
-*(Seeder script is a future task -- current repo contains empty `__init__.py` placeholder.)*
-
----
-
-## How to Connect Real Integrations
-
-Each integration has two sides:
-
-### A. Backend adapter (`integrations/<service>/__init__.py`)
-
-Each adapter extends `BaseIntegration` (from `integrations/base.py`) and implements:
-- `pull()` -> fetch records from bot's API
-- `push(data)` -> send data to bot's API
-- `normalize(raw_data)` -> map bot format -> Agency OS DTO
-
-To connect a real bot:
-
-1. Set the bot's URL in `.env`:
-   ```env
-   CRM_URL=https://your-bot1-instance.herokuapp.com/api
-   CRM_TOKEN=eyJhbGciOi...
-   ```
-2. Implement `pull()` / `push()` in `integrations/crm/__init__.py` using `httpx`:
-   ```python
-   async def pull(self):
-       client = await self._get_http_client()
-       resp = await client.get("/leads", params={"status": "new"})
-       resp.raise_for_status()
-       return [self.normalize(r) for r in resp.json()]
-   ```
-3. The `healthcheck()` method (already in `BaseIntegration`) will ping `/health` on the bot.
-
-### B. Frontend (Integrations page)
-
-The `/integrations` page already calls:
-- `POST /integrations/:id/healthcheck`
-- `POST /integrations/:id/sync`
-- `GET /integrations/:id/logs`
-
-So once the backend stores `IntegrationConfig` rows, the UI works out of the box.
-
----
-
-## What Is Implemented
-
-### Backend (FastAPI)
-
-- **Auth**: JWT login/logout/me, bcrypt password hashing, bearer middleware
-- **Role-based access**: `admin`, `manager`, `viewer` -- enforced via `require_role()`
-- **CRUD API**:
-  - `GET/POST /projects`
-  - `GET/POST/PUT/DELETE /leads`, `GET/POST /leads/:id/events`
-  - `GET/POST/PUT/DELETE /conversations`, `GET/POST /conversations/:id/messages`
-  - `GET/POST/PUT/DELETE /content`, `GET /content/plans`
-  - `GET/POST/PUT/DELETE /publications`
-  - `GET /reports/snapshots`
-  - `GET/POST/PUT/DELETE /integrations`, `POST /:id/healthcheck`, `POST /:id/sync`, `GET /:id/logs`
-  - `GET/POST/PUT/DELETE /users`
-  - `GET/PUT/DELETE /settings` (key-value)
-- **Database**: 13 SQLAlchemy models, 2 Alembic migrations, async session DI
-- **CORS**: Configurable via `CORS_ORIGINS`
-- **OpenAPI docs**: auto-generated at `/docs`
-
-### Frontend (Next.js 14)
-
-- **Layout**: fixed Sidebar (10 sections) + TopBar (project selector, user avatar, logout, integration badges)
-- **Pages**: Dashboard, Clinics, CRM, AI Dialogs, Content Studio, Publishing, Reports, Integrations, Users, Settings
-- **Auth**: context + protected route group, redirect to `/login`
-- **Data fetching**: React Query `useQuery` / `useMutation` with typed `ApiClient`
-- **UI**: shadcn/ui components (Button, Card, Badge, Input, Table, Avatar, Separator) + Tailwind
-
-### Integrations
-
-- Abstract `BaseIntegration` class with `healthcheck()`, `sync()`, `pull()`, `push()`, `normalize()`, `log_error()`
-- 5 mock adapters ready to be connected to real APIs:
-  - `CRMIntegration` (bot1_crm)
-  - `ConsultationIntegration` (bot2_consultation_ai)
-  - `ContentFarmIntegration` (bot3_content_farm)
-  - `AutoposterIntegration` (autoposter_bot)
-  - `ReportsIntegration` (bot5_otchet)
-
----
-
-## Roadmap
-
-- [ ] **Real adapter implementations** -- replace mock data with `httpx` calls to actual bot APIs
-- [ ] **Seeder scripts** -- populate DB with demo projects, users, and leads
-- [ ] **Celery beat scheduler** -- periodic sync tasks for each integration
-- [ ] **Webhook receivers** -- bots push events to Agency OS webhooks
-- [ ] **File uploads** -- media library for content & publications
-- [ ] **Audit log** -- track all CRUD changes
-- [ ] **Multi-tenancy** -- row-level security per project
-- [ ] **Docker Compose full stack** -- one-command `docker compose up` for everything
-- [ ] **CLI tool** -- `agency-os` command for migrations, seeds, users
-- [ ] **Unit & integration tests** -- pytest + Playwright
-- [ ] **CI/CD** -- GitHub Actions build + deploy
-
----
-
-## License
-
-MIT
-
-
- 
+That dataset allows the system to learn **what content production decision is most likely to produce the desired business action, at what cost, and with what confidence**.

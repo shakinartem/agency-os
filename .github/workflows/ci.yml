@@ -1,0 +1,131 @@
+name: Content Factory CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main, agent/content-factory-core]
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python, migrations and contract tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: agency
+          POSTGRES_PASSWORD: agency_secret
+          POSTGRES_DB: agency_os
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U agency -d agency_os"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install backend and worker dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+          pip install -r apps/worker/requirements.txt
+      - name: Compile Python sources
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+        run: python -m compileall -q apps/api apps/worker packages/database scripts
+      - name: Apply database migrations on PostgreSQL
+        working-directory: packages/database
+        env:
+          PYTHONPATH: ${{ github.workspace }}/packages
+          DATABASE_URL: postgresql+psycopg2://agency:agency_secret@localhost:5432/agency_os
+        run: alembic upgrade head
+      - name: Import API and registered worker tasks
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+          REDIS_URL: redis://localhost:6379/0
+        run: |
+          python -c "from app.main import app as api_app; print(api_app.title)"
+          python -c "from apps.worker.tasks.factory_worker import app as worker_app; print(worker_app.main)"
+          python -c "from apps.worker.tasks.review_tasks import approve_content; assert approve_content.name == 'content_factory.approve_content'"
+          python -c "from apps.worker.tasks.strategy_tasks import generate_rubrics; assert generate_rubrics.name == 'content_factory.generate_rubrics'"
+          python -c "from apps.worker.tasks.batch_tasks import plan_batch; assert plan_batch.name == 'content_factory.plan_batch'"
+          python -c "from apps.worker.tasks.delivery_tasks import send_delivery_v2; assert send_delivery_v2.name == 'content_factory.send_delivery_v2'"
+          python -c "from apps.worker.tasks.dispatch_tasks import dispatch_task_outbox, execute_outbox_task; assert dispatch_task_outbox.name == 'content_factory.dispatch_task_outbox'; assert execute_outbox_task.name == 'content_factory.execute_outbox_task'"
+          python -c "from apps.worker.tasks import model_router_runtime; assert model_router_runtime.routed_chat_json; print('model router runtime installed')"
+          python -c "from apps.worker.tasks import prompt_experiment_runtime; assert prompt_experiment_runtime.experiment_chat_json; print('prompt experiment runtime installed')"
+      - name: Run API tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+        run: pytest -q apps/api/tests
+      - name: Run worker tests
+        env:
+          PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
+          DATABASE_URL: postgresql+asyncpg://agency:agency_secret@localhost:5432/agency_os
+        run: pytest -q apps/worker/tests
+
+  web:
+    name: Next.js production build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package.json
+      - name: Install dependencies
+        run: npm install
+      - name: Build
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8010
+        run: npm run build
+
+  compose:
+    name: Docker Compose contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate development and production deployment contracts
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          cat > .env.prod.ci <<'EOF'
+          APP_ENV=production
+          APP_DEBUG=false
+          FACTORY_DOMAIN=factory.example.com
+          FACTORY_ASSETS_DOMAIN=assets.factory.example.com
+          DATABASE_URL=postgresql+asyncpg://agency:ci-postgres-password-123456789@postgres:5432/agency_os
+          POSTGRES_PASSWORD=ci-postgres-password-123456789
+          MINIO_ROOT_USER=ci-content-factory
+          MINIO_ROOT_PASSWORD=ci-minio-password-123456789012
+          MINIO_APP_USER=ci-content-app
+          MINIO_APP_PASSWORD=ci-minio-app-password-123456789012
+          SECRET_KEY=ci-secret-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SESSION_COOKIE_SECURE=true
+          CORS_ORIGINS=["https://factory.example.com"]
+          ALLOWED_HOSTS=["factory.example.com","content-factory-api","api","localhost"]
+          AUTOPOSTER_TOKEN=ci-autoposter-token-cccccccccccccccccccccccc
+          LLM_API_KEY=ci-not-a-real-provider-key
+          PERFORMANCE_INGEST_TOKEN=ci-performance-token-dddddddddddddddddddddddd
+          LLM_MODEL_PRICING_JSON={"gpt-ci":{"input_per_1m":1,"output_per_1m":1}}
+          EOF
+          python scripts/server-preflight.py --env .env.prod.ci
+          docker compose --env-file .env.prod.ci -f deploy/docker-compose.prod.yml config --quiet
+          docker run --rm \
+            -e FACTORY_DOMAIN=factory.example.com \
+            -e FACTORY_ASSETS_DOMAIN=assets.factory.example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile

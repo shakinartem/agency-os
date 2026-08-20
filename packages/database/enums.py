@@ -48,7 +48,11 @@ class MessageRole(str, enum.Enum):
 class ContentType(str, enum.Enum):
     post = "post"
     article = "article"
-    video = "video"
+    commercial_proposal = "commercial_proposal"
+    rubric = "rubric"
+    carousel = "carousel"
+    video_script = "video_script"
+    short_script = "short_script"
     story = "story"
     other = "other"
 
@@ -59,14 +63,63 @@ class ContentStatus(str, enum.Enum):
     approved = "approved"
     published = "published"
     archived = "archived"
+    queued = "queued"
+    planning = "planning"
+    researching = "researching"
+    drafting = "drafting"
+    evaluating = "evaluating"
+    revising = "revising"
+    humanizing = "humanizing"
+    adapting = "adapting"
+    generating_media = "generating_media"
+    media_review = "media_review"
+    final_review = "final_review"
+    ready = "ready"
+    exporting = "exporting"
+    exported = "exported"
+    failed = "failed"
+
+
+class GenerationRunStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    awaiting_review = "awaiting_review"
+    ready = "ready"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
+class GenerationStepStatus(str, enum.Enum):
+    queued = "queued"
+    running = "running"
+    passed = "passed"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class MediaStatus(str, enum.Enum):
+    queued = "queued"
+    generating = "generating"
+    review = "review"
+    ready = "ready"
+    failed = "failed"
+
+
+class ExportStatus(str, enum.Enum):
+    queued = "queued"
+    sending = "sending"
+    accepted = "accepted"
+    failed = "failed"
 
 
 class Platform(str, enum.Enum):
     telegram = "telegram"
-    facebook = "facebook"
-    instagram = "instagram"
     vk = "vk"
+    instagram = "instagram"
+    facebook = "facebook"
+    dzen = "dzen"
     website = "website"
+    linkedin = "linkedin"
     other = "other"
 
 
