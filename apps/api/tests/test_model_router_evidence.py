@@ -60,6 +60,7 @@ def test_shadow_qualified_candidate_becomes_production_eligible_after_live_gate(
 
 def test_step_parser_keeps_shadow_evidence_separate_from_live_performance():
     content_id = uuid.uuid4()
+    run_id = uuid.uuid4()
     step = SimpleNamespace(
         model="default",
         output_json={
@@ -72,8 +73,8 @@ def test_step_parser_keeps_shadow_evidence_separate_from_live_performance():
             },
         },
     )
-    run = SimpleNamespace(quality_score=0.89, content_item_id=content_id)
-    rows = records_from_step(step, run, {content_id: 0.7})
+    run = SimpleNamespace(id=run_id, quality_score=0.89, content_item_id=content_id)
+    rows = records_from_step(step, run, {run_id: 0.7})
     live = next(row for row in rows if row["evidence_source"] == "live")
     shadow = next(row for row in rows if row["evidence_source"] == "shadow")
     assert live["model"] == "default"

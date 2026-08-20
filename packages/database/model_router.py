@@ -33,7 +33,11 @@ ROUTED_STAGE_FAMILIES = (
 
 def router_mode() -> str:
     value = os.getenv("MODEL_ROUTER_MODE", "shadow").strip().lower()
-    return value if value in {"off", "shadow", "active"} else "shadow"
+    if value not in {"off", "shadow", "active"}:
+        value = "shadow"
+    if value == "active" and os.getenv("MODEL_ROUTER_ACTIVE_ACK", "").strip() != "I_UNDERSTAND_LIVE_ROUTING":
+        return "shadow"
+    return value
 
 
 def configured_candidates(default_model: str) -> list[str]:
@@ -120,7 +124,7 @@ def _metric_value(bucket: dict[str, float], metric: str) -> float:
     return reach / bucket["publications"] if bucket["publications"] > 0 else 0.0
 
 
-def _performance_scores(records: list[dict[str, Any]]) -> tuple[str, dict[uuid.UUID, float]]:
+def _performance_scores(records: list[dict[str, Any]], metric_override: str | None = None) -> tuple[str, dict[uuid.UUID, float]]:
     total = _metric_bucket()
     by_content: dict[uuid.UUID, dict[str, float]] = defaultdict(_metric_bucket)
     for row in records:
@@ -130,7 +134,8 @@ def _performance_scores(records: list[dict[str, Any]]) -> tuple[str, dict[uuid.U
         metrics = row.get("metrics") or {}
         _add_metrics(total, metrics)
         _add_metrics(by_content[content_id], metrics)
-    metric = _primary_metric(total)
+    supported = {"conversions_per_1000_views", "leads_per_1000_views", "ctr", "views_per_publication"}
+    metric = metric_override if metric_override in supported else _primary_metric(total)
     baseline = _metric_value(total, metric)
     if baseline <= 0:
         return metric, {}

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
+from math import sqrt
+from statistics import NormalDist, stdev
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -142,7 +144,18 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def summarize_arm_observations(observations: Iterable[Any], min_samples: int) -> dict[str, Any]:
+def _wilson_interval(successes: int, trials: int, z: float) -> tuple[float | None, float | None]:
+    if trials <= 0:
+        return None, None
+    p = successes / trials
+    z2 = z * z
+    denominator = 1 + z2 / trials
+    centre = (p + z2 / (2 * trials)) / denominator
+    spread = z * sqrt((p * (1 - p) / trials) + z2 / (4 * trials * trials)) / denominator
+    return max(0.0, centre - spread), min(1.0, centre + spread)
+
+
+def summarize_arm_observations(observations: Iterable[Any], min_samples: int, *, alpha: float = 0.05) -> dict[str, Any]:
     rows = list(observations)
     passed = [row for row in rows if getattr(row, "status", None) == "passed"]
     valid = [row for row in passed if _number(getattr(row, "quality_delta", None)) is not None]
@@ -161,19 +174,40 @@ def summarize_arm_observations(observations: Iterable[Any], min_samples: int) ->
     average_delta = sum(deltas) / len(deltas) if deltas else None
     candidate_win_rate = candidate_wins / decisive if decisive else None
 
+    # Conservative sequential peeking guard: every additional min_samples-sized look spends
+    # another slice of alpha. build_prompt_experiment_report also divides alpha across arms.
+    look_index = max(1, (samples + max(1, min_samples) - 1) // max(1, min_samples))
+    adjusted_alpha = max(1e-6, min(0.25, float(alpha) / look_index))
+    z = NormalDist().inv_cdf(1 - adjusted_alpha / 2)
+    win_low, win_high = _wilson_interval(candidate_wins, decisive, z)
+
+    delta_low = delta_high = None
+    if len(deltas) >= 2 and average_delta is not None:
+        sem = stdev(deltas) / sqrt(len(deltas))
+        delta_low = average_delta - z * sem
+        delta_high = average_delta + z * sem
+
     if samples < min_samples:
         decision = "collecting"
     elif failure_rate > 0.10:
         decision = "reject_reliability"
-    elif average_delta is not None and average_delta >= 0.02 and candidate_win_rate is not None and candidate_win_rate >= 0.55:
+    elif (
+        average_delta is not None and average_delta >= 0.02
+        and delta_low is not None and delta_low > 0
+        and win_low is not None and win_low > 0.50
+    ):
         decision = "promising"
-    elif average_delta is not None and average_delta <= -0.02 and candidate_win_rate is not None and candidate_win_rate <= 0.45:
+    elif (
+        average_delta is not None and average_delta <= -0.02
+        and delta_high is not None and delta_high < 0
+        and win_high is not None and win_high < 0.50
+    ):
         decision = "reject"
     else:
         decision = "inconclusive"
 
     confidence = "low"
-    if samples >= max(min_samples * 3, 60):
+    if samples >= max(min_samples * 3, 60) and decision in {"promising", "reject"}:
         confidence = "high"
     elif samples >= min_samples:
         confidence = "medium"
@@ -182,21 +216,20 @@ def summarize_arm_observations(observations: Iterable[Any], min_samples: int) ->
         return sum(values) / len(values) if values else None
 
     return {
-        "observations": len(rows),
-        "valid_samples": samples,
-        "failed_samples": len(rows) - len(passed),
-        "candidate_wins": candidate_wins,
-        "control_wins": control_wins,
-        "ties": ties,
+        "observations": len(rows), "valid_samples": samples, "failed_samples": len(rows) - len(passed),
+        "candidate_wins": candidate_wins, "control_wins": control_wins, "ties": ties,
         "candidate_win_rate": round(candidate_win_rate, 4) if candidate_win_rate is not None else None,
+        "candidate_win_rate_ci_low": round(win_low, 4) if win_low is not None else None,
+        "candidate_win_rate_ci_high": round(win_high, 4) if win_high is not None else None,
         "average_quality_delta": round(average_delta, 4) if average_delta is not None else None,
+        "quality_delta_ci_low": round(delta_low, 4) if delta_low is not None else None,
+        "quality_delta_ci_high": round(delta_high, 4) if delta_high is not None else None,
         "average_candidate_quality": round(mean(candidate_quality), 4) if candidate_quality else None,
         "average_control_quality": round(mean(control_quality), 4) if control_quality else None,
         "average_candidate_latency_ms": round(mean(latencies)) if latencies else None,
         "average_candidate_cost_usd": round(mean(costs), 8) if costs else None,
-        "failure_rate": round(failure_rate, 4),
-        "confidence": confidence,
-        "decision": decision,
+        "failure_rate": round(failure_rate, 4), "confidence": confidence, "decision": decision,
+        "sequential_look": look_index, "adjusted_alpha": round(adjusted_alpha, 6),
     }
 
 
@@ -247,7 +280,11 @@ async def build_prompt_experiment_report(session: AsyncSession, project_id: uuid
     for experiment in experiments:
         arm_rows = []
         for arm in arms_by_experiment.get(experiment.id, []):
-            summary = summarize_arm_observations(observations_by_arm.get(arm.id, []), experiment.min_samples)
+            summary = summarize_arm_observations(
+                observations_by_arm.get(arm.id, []),
+                experiment.min_samples,
+                alpha=0.05 / max(1, len(arms_by_experiment.get(experiment.id, []))),
+            )
             arm_rows.append({
                 "id": str(arm.id),
                 "key": arm.key,

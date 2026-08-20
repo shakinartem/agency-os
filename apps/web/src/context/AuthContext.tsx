@@ -13,10 +13,9 @@ export interface User {
 
 interface AuthState {
   user: User | null;
-  token: string | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -24,44 +23,31 @@ const AuthContext = createContext<AuthState | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const refresh = async () => {
     try {
-      const u = await api.get<User>("/auth/me");
-      setUser(u);
+      setUser(await api.get<User>("/auth/me"));
     } catch {
       setUser(null);
-      api.setToken(null);
     }
   };
 
   useEffect(() => {
-    const t = api.loadToken();
-    if (t) {
-      setToken(t);
-      refresh().finally(() => setLoading(false));
-    } else {
-      setLoading(false);
-    }
+    refresh().finally(() => setLoading(false));
   }, []);
 
   const login = async (email: string, password: string) => {
-    const res = await api.post<{ access_token: string }>("/auth/login", { email, password });
-    api.setToken(res.access_token);
-    setToken(res.access_token);
+    await api.post<{ authenticated: boolean; expires_in_seconds: number }>("/auth/login", { email, password });
     await refresh();
   };
 
-  const logout = () => {
-    api.setToken(null);
-    setUser(null);
-    setToken(null);
+  const logout = async () => {
+    try { await api.post<void>("/auth/logout"); } finally { setUser(null); }
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, loading, login, logout, refresh }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, refresh }}>
       {children}
     </AuthContext.Provider>
   );

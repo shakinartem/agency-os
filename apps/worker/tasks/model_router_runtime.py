@@ -26,6 +26,7 @@ from . import providers
 _ROUTED_MODEL: ContextVar[str | None] = ContextVar("content_factory_routed_model", default=None)
 _ROUTER_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("content_factory_router_context", default=None)
 _SHADOW_TRACE: ContextVar[dict[str, Any] | None] = ContextVar("content_factory_shadow_trace", default=None)
+_CURRENT_STEP_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("content_factory_current_step_context", default=None)
 _ORIGINAL_STAGE = factory_worker._stage
 _ORIGINAL_COMPLETE_STEP = factory_worker._complete_step
 
@@ -275,6 +276,17 @@ async def _judge_shadow_trial(
 
 async def routed_chat_json(system: str, prompt: str, *, model: str | None = None) -> dict[str, Any]:
     """Return production output while optionally collecting an isolated shadow candidate trial."""
+    step_context = _CURRENT_STEP_CONTEXT.get()
+    if step_context:
+        step = step_context.get("step")
+        session = step_context.get("session")
+        if step is not None and session is not None:
+            payload = dict(step.input_json or {})
+            payload["_prompt_hash"] = hashlib.sha256((system + "\0" + prompt).encode("utf-8")).hexdigest()
+            payload["_system_prompt_hash"] = hashlib.sha256(system.encode("utf-8")).hexdigest()
+            payload["_user_prompt_hash"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            step.input_json = payload
+            await session.flush()
     selected_model = model or _ROUTED_MODEL.get() or providers.LLM_MODEL
     context = _ROUTER_CONTEXT.get()
     candidate_model = _shadow_candidate((context or {}).get("decision") or {}, providers.LLM_MODEL)
@@ -366,7 +378,7 @@ async def routed_stage(
         _ROUTED_MODEL.set(None)
         _ROUTER_CONTEXT.set(None)
 
-    return await _ORIGINAL_STAGE(
+    step = await _ORIGINAL_STAGE(
         session,
         run,
         name,
@@ -374,11 +386,17 @@ async def routed_stage(
         provider=provider,
         model=resolved_model,
     )
+    if provider == "openai-compatible":
+        _CURRENT_STEP_CONTEXT.set({"session": session, "step": step})
+    else:
+        _CURRENT_STEP_CONTEXT.set(None)
+    return step
 
 
 async def routed_complete_step(session, step, output: dict[str, Any], status=None) -> None:
     trace = _SHADOW_TRACE.get()
     _SHADOW_TRACE.set(None)
+    _CURRENT_STEP_CONTEXT.set(None)
     persisted = dict(output or {})
     if trace:
         persisted["_model_router_shadow"] = trace

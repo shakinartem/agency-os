@@ -1,0 +1,285 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agency}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-agency_os}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agency} -d ${POSTGRES_DB:-agency_os}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    volumes:
+      - redisdata:/data
+    networks: [data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+    volumes:
+      - miniodata:/data
+    networks: [data, assets]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set MINIO_ROOT_PASSWORD}
+      MINIO_APP_USER: ${MINIO_APP_USER:?Set MINIO_APP_USER}
+      MINIO_APP_PASSWORD: ${MINIO_APP_PASSWORD:?Set MINIO_APP_PASSWORD}
+    volumes:
+      - ./minio-content-policy.json:/tmp/content-policy.json:ro
+    entrypoint: >
+      /bin/sh -ec '
+      mc alias set local http://minio:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD";
+      mc mb --ignore-existing local/content-assets;
+      mc anonymous set none local/content-assets;
+      mc admin user add local "$MINIO_APP_USER" "$MINIO_APP_PASSWORD" >/dev/null 2>&1 || true;
+      mc admin policy create local content-assets-rw /tmp/content-policy.json >/dev/null 2>&1 || true;
+      mc admin policy attach local content-assets-rw --user "$MINIO_APP_USER";
+      '
+    networks: [data]
+    restart: "no"
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [data]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      API_DOCS_ENABLED: "false"
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
+      SESSION_COOKIE_SECURE: "true"
+      SESSION_COOKIE_SAMESITE: lax
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["https://${FACTORY_DOMAIN:?Set FACTORY_DOMAIN}"]'
+      ALLOWED_HOSTS: '["${FACTORY_DOMAIN}","content-factory-api","api","localhost"]'
+      FACTORY_LLM_ENABLED: ${FACTORY_LLM_ENABLED:-true}
+      FACTORY_RESEARCH_ENABLED: ${FACTORY_RESEARCH_ENABLED:-false}
+      FACTORY_IMAGE_ENABLED: ${FACTORY_IMAGE_ENABLED:-true}
+      FACTORY_OBJECT_STORAGE_ENABLED: "true"
+      AUTOPOSTER_URL: ${AUTOPOSTER_URL:-http://autoposter-api:8000/api/v1/integrations/content-factory/packages}
+      PERFORMANCE_INGEST_TOKEN: ${PERFORMANCE_INGEST_TOKEN:?Set PERFORMANCE_INGEST_TOKEN}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      data: {}
+      app:
+        aliases: [content-factory-api]
+      qualive-backbone:
+        aliases: [content-factory-api]
+    expose: ["8000"]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY}
+      LLM_MODEL: ${LLM_MODEL:-gpt-5.6}
+      LLM_MODEL_CANDIDATES: ${LLM_MODEL_CANDIDATES:-gpt-5.6}
+      LLM_INPUT_COST_PER_1M_USD: ${LLM_INPUT_COST_PER_1M_USD:-0}
+      LLM_OUTPUT_COST_PER_1M_USD: ${LLM_OUTPUT_COST_PER_1M_USD:-0}
+      LLM_MODEL_PRICING_JSON: ${LLM_MODEL_PRICING_JSON:-{}}
+      CONTENT_PROMPT_VERSION: ${CONTENT_PROMPT_VERSION:-factory-v3-knowledge-research-media}
+      MODEL_ROUTER_MODE: ${MODEL_ROUTER_MODE:-shadow}
+      MODEL_ROUTER_ACTIVE_ACK: ${MODEL_ROUTER_ACTIVE_ACK:-}
+      MODEL_ROUTER_MIN_SAMPLES_PER_MODEL: ${MODEL_ROUTER_MIN_SAMPLES_PER_MODEL:-10}
+      MODEL_ROUTER_MIN_LIVE_SAMPLES: ${MODEL_ROUTER_MIN_LIVE_SAMPLES:-3}
+      MODEL_ROUTER_MIN_DOWNSTREAM_SAMPLES: ${MODEL_ROUTER_MIN_DOWNSTREAM_SAMPLES:-3}
+      MODEL_ROUTER_QUALITY_FLOOR: ${MODEL_ROUTER_QUALITY_FLOOR:-0.84}
+      MODEL_ROUTER_SHADOW_SAMPLE_RATE: ${MODEL_ROUTER_SHADOW_SAMPLE_RATE:-0.05}
+      MODEL_ROUTER_JUDGE_MODEL: ${MODEL_ROUTER_JUDGE_MODEL:-}
+      MODEL_ROUTER_EXPLORATION_RATE: ${MODEL_ROUTER_EXPLORATION_RATE:-0.10}
+      MODEL_ROUTER_QUALITY_WEIGHT: ${MODEL_ROUTER_QUALITY_WEIGHT:-0.65}
+      MODEL_ROUTER_PERFORMANCE_WEIGHT: ${MODEL_ROUTER_PERFORMANCE_WEIGHT:-0.20}
+      MODEL_ROUTER_LATENCY_WEIGHT: ${MODEL_ROUTER_LATENCY_WEIGHT:-0.10}
+      MODEL_ROUTER_COST_WEIGHT: ${MODEL_ROUTER_COST_WEIGHT:-0.05}
+      MODEL_ROUTER_SNAPSHOT_TTL_SECONDS: ${MODEL_ROUTER_SNAPSHOT_TTL_SECONDS:-300}
+      MODEL_ROUTER_REFRESH_DEDUPE_SECONDS: ${MODEL_ROUTER_REFRESH_DEDUPE_SECONDS:-60}
+      GENERATION_MAX_RUN_COST_USD: ${GENERATION_MAX_RUN_COST_USD:-0}
+      GENERATION_DAILY_BUDGET_USD: ${GENERATION_DAILY_BUDGET_USD:-0}
+      GENERATION_MONTHLY_BUDGET_USD: ${GENERATION_MONTHLY_BUDGET_USD:-0}
+      GENERATION_BUDGET_REQUIRE_PRICING: ${GENERATION_BUDGET_REQUIRE_PRICING:-true}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      TAVILY_API_URL: ${TAVILY_API_URL:-https://api.tavily.com/search}
+      RESEARCH_MAX_RESULTS: ${RESEARCH_MAX_RESULTS:-5}
+      RESEARCH_MIN_SCORE: ${RESEARCH_MIN_SCORE:-0.45}
+      TAVILY_COST_PER_REQUEST_USD: ${TAVILY_COST_PER_REQUEST_USD:-0}
+      IMAGE_API_URL: ${IMAGE_API_URL:-}
+      IMAGE_API_KEY: ${IMAGE_API_KEY:-}
+      IMAGE_MODEL: ${IMAGE_MODEL:-gpt-image-1.5}
+      IMAGE_SIZE: ${IMAGE_SIZE:-1024x1024}
+      IMAGE_COST_PER_GENERATION_USD: ${IMAGE_COST_PER_GENERATION_USD:-0}
+      MEDIA_QUALITY_THRESHOLD: ${MEDIA_QUALITY_THRESHOLD:-0.86}
+      MAX_IMAGE_ATTEMPTS: ${MAX_IMAGE_ATTEMPTS:-2}
+      QUALITY_THRESHOLD: ${QUALITY_THRESHOLD:-0.87}
+      FACTUALITY_THRESHOLD: ${FACTUALITY_THRESHOLD:-0.95}
+      BRAND_VOICE_THRESHOLD: ${BRAND_VOICE_THRESHOLD:-0.85}
+      MAX_REVISION_ATTEMPTS: ${MAX_REVISION_ATTEMPTS:-2}
+      TASK_OUTBOX_DISPATCH_BATCH: ${TASK_OUTBOX_DISPATCH_BATCH:-50}
+      TASK_OUTBOX_STALE_SECONDS: ${TASK_OUTBOX_STALE_SECONDS:-300}
+      TASK_OUTBOX_STALE_EXECUTION_SECONDS: ${TASK_OUTBOX_STALE_EXECUTION_SECONDS:-1800}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_PUBLIC_ENDPOINT_URL: https://${FACTORY_ASSETS_DOMAIN:?Set FACTORY_ASSETS_DOMAIN}
+      S3_ACCESS_KEY: ${MINIO_APP_USER:?Set MINIO_APP_USER}
+      S3_SECRET_KEY: ${MINIO_APP_PASSWORD:?Set MINIO_APP_PASSWORD}
+      S3_BUCKET: content-assets
+      AUTOPOSTER_URL: ${AUTOPOSTER_URL:-http://autoposter-api:8000/api/v1/integrations/content-factory/packages}
+      AUTOPOSTER_TOKEN: ${AUTOPOSTER_TOKEN:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    networks: [data, qualive-backbone]
+    read_only: true
+    tmpfs: ["/tmp:size=128m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    command: ["celery", "-A", "apps.worker.tasks.dispatch_tasks", "beat", "--loglevel=info", "--schedule", "/tmp/celerybeat-schedule"]
+    environment:
+      APP_ENV: production
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_URL: redis://redis:6379/0
+      TASK_OUTBOX_DISPATCH_INTERVAL_SECONDS: ${TASK_OUTBOX_DISPATCH_INTERVAL_SECONDS:-2}
+      TASK_OUTBOX_DISPATCH_BATCH: ${TASK_OUTBOX_DISPATCH_BATCH:-50}
+      TASK_OUTBOX_STALE_SECONDS: ${TASK_OUTBOX_STALE_SECONDS:-300}
+      TASK_OUTBOX_STALE_EXECUTION_SECONDS: ${TASK_OUTBOX_STALE_EXECUTION_SECONDS:-1800}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [data]
+    read_only: true
+    tmpfs: ["/tmp:size=32m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [app]
+    expose: ["3000"]
+    read_only: true
+    tmpfs: ["/tmp:size=32m"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    environment:
+      FACTORY_DOMAIN: ${FACTORY_DOMAIN:?Set FACTORY_DOMAIN}
+      FACTORY_ASSETS_DOMAIN: ${FACTORY_ASSETS_DOMAIN:?Set FACTORY_ASSETS_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      web:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    networks: [edge, app, assets]
+    restart: unless-stopped
+
+networks:
+  edge: {}
+  data:
+    internal: true
+  app:
+    internal: true
+  assets:
+    internal: true
+  qualive-backbone:
+    external: true
+    name: ${QUALIVE_DOCKER_NETWORK:-qualive-backbone}
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
+  caddydata:
+  caddyconfig:

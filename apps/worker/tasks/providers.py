@@ -29,11 +29,13 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_API_URL = os.getenv("TAVILY_API_URL", "https://api.tavily.com/search")
 RESEARCH_MAX_RESULTS = int(os.getenv("RESEARCH_MAX_RESULTS", "5"))
 RESEARCH_MIN_SCORE = float(os.getenv("RESEARCH_MIN_SCORE", "0.45"))
+TAVILY_COST_PER_REQUEST_USD = float(os.getenv("TAVILY_COST_PER_REQUEST_USD", "0"))
 
 IMAGE_API_URL = os.getenv("IMAGE_API_URL") or f"{LLM_BASE_URL}/images/generations"
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY") or LLM_API_KEY
 IMAGE_MODEL = os.getenv("IMAGE_MODEL", "gpt-image-1.5")
 IMAGE_SIZE = os.getenv("IMAGE_SIZE", "1024x1024")
+IMAGE_COST_PER_GENERATION_USD = float(os.getenv("IMAGE_COST_PER_GENERATION_USD", "0"))
 MEDIA_QUALITY_THRESHOLD = float(os.getenv("MEDIA_QUALITY_THRESHOLD", "0.86"))
 MAX_IMAGE_ATTEMPTS = int(os.getenv("MAX_IMAGE_ATTEMPTS", "2"))
 
@@ -159,7 +161,7 @@ async def research_web(query: str) -> dict[str, Any]:
             "request_id": data.get("request_id"),
             "latency_ms": latency_ms,
             "results": len(sources),
-            "estimated_cost_usd": None,
+            "estimated_cost_usd": TAVILY_COST_PER_REQUEST_USD if TAVILY_COST_PER_REQUEST_USD > 0 else None,
         },
     }
 
@@ -170,6 +172,7 @@ async def generate_image_bytes(prompt: str) -> dict[str, Any]:
 
     headers = {"Authorization": f"Bearer {IMAGE_API_KEY}", "Content-Type": "application/json"}
     payload = {"model": IMAGE_MODEL, "prompt": prompt, "size": IMAGE_SIZE}
+    started = time.perf_counter()
     async with httpx.AsyncClient(timeout=240) as client:
         response = await client.post(IMAGE_API_URL, headers=headers, json=payload)
         response.raise_for_status()
@@ -181,6 +184,11 @@ async def generate_image_bytes(prompt: str) -> dict[str, Any]:
                 "bytes": base64.b64decode(first["b64_json"]),
                 "mime_type": "image/png",
                 "provider_payload": {"revised_prompt": first.get("revised_prompt")},
+                "_provider_meta": {
+                    "provider": "image", "model": IMAGE_MODEL,
+                    "latency_ms": max(0, round((time.perf_counter() - started) * 1000)),
+                    "estimated_cost_usd": IMAGE_COST_PER_GENERATION_USD if IMAGE_COST_PER_GENERATION_USD > 0 else None,
+                },
             }
         if first.get("url"):
             image_response = await client.get(first["url"])
@@ -190,6 +198,11 @@ async def generate_image_bytes(prompt: str) -> dict[str, Any]:
                 "bytes": image_response.content,
                 "mime_type": image_response.headers.get("content-type", "image/png").split(";")[0],
                 "provider_payload": {"revised_prompt": first.get("revised_prompt")},
+                "_provider_meta": {
+                    "provider": "image", "model": IMAGE_MODEL,
+                    "latency_ms": max(0, round((time.perf_counter() - started) * 1000)),
+                    "estimated_cost_usd": IMAGE_COST_PER_GENERATION_USD if IMAGE_COST_PER_GENERATION_USD > 0 else None,
+                },
             }
     return {"status": "skipped", "reason": "Image provider returned neither b64_json nor url"}
 
@@ -298,7 +311,7 @@ async def create_reviewed_media(prompt: str, content_context: str, content_item_
             return {**generated, "attempts": history}
 
         review = await review_image(generated["bytes"], generated["mime_type"], content_context, current_prompt)
-        history.append({"attempt": attempt, "prompt": current_prompt, "review": review})
+        history.append({"attempt": attempt, "prompt": current_prompt, "generation": {"_provider_meta": generated.get("_provider_meta")}, "review": review})
         if review.get("passed"):
             stored = await store_media(generated["bytes"], generated["mime_type"], content_item_id)
             if stored.get("status") != "passed":

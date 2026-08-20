@@ -1,10 +1,10 @@
 """Performance-informed planning helpers.
 
-The learning layer is intentionally deterministic. It treats downstream metrics as a
-prior for future planning, not as ground truth, and gates allocation advice by sample
-size so a handful of lucky publications cannot collapse exploration.
+Downstream outcomes are treated as noisy priors, never causal truth. The business metric is
+project-configured and stable; it does not change just because the first click/lead/conversion
+arrived. Content allocation only learns from content-controlled dimensions (type/rubric), while
+platform/account remain diagnostic context to reduce distribution confounding.
 """
-
 from __future__ import annotations
 
 import uuid
@@ -13,11 +13,17 @@ from typing import Any
 
 from sqlalchemy import select
 
-from .models import ContentItem, GenerationRun, PerformanceSnapshot, ProductionBatchItem, Rubric
+from .models import ContentItem, GenerationRun, PerformanceSnapshot, ProductionBatchItem, Project, Rubric
 
 MIN_ACTION_SAMPLE = 5
-HIGH_CONFIDENCE_SAMPLE = 15
+HIGH_CONFIDENCE_MULTIPLIER = 3
 DEFAULT_EXPLORATION_SHARE = 0.25
+SUPPORTED_PRIMARY_METRICS = {
+    "views_per_publication",
+    "ctr",
+    "leads_per_1000_views",
+    "conversions_per_1000_views",
+}
 
 
 def _number(value: Any) -> float:
@@ -25,16 +31,8 @@ def _number(value: Any) -> float:
 
 
 def _bucket() -> dict[str, float]:
-    return {
-        "publications": 0.0,
-        "views": 0.0,
-        "impressions": 0.0,
-        "clicks": 0.0,
-        "leads": 0.0,
-        "conversions": 0.0,
-        "revenue": 0.0,
-        "reach": 0.0,
-    }
+    return {"publications": 0.0, "views": 0.0, "impressions": 0.0, "clicks": 0.0, "leads": 0.0,
+            "conversions": 0.0, "revenue": 0.0, "reach": 0.0}
 
 
 def _add(bucket: dict[str, float], metrics: dict[str, Any]) -> None:
@@ -57,38 +55,23 @@ def _metric_value(bucket: dict[str, float], metric: str) -> float:
     return (reach / bucket["publications"]) if bucket["publications"] > 0 else 0.0
 
 
-def _primary_metric(total: dict[str, float]) -> tuple[str, str]:
-    if total["conversions"] > 0 and total["reach"] > 0:
-        return "conversions_per_1000_views", "conversions / 1k views"
-    if total["leads"] > 0 and total["reach"] > 0:
-        return "leads_per_1000_views", "leads / 1k views"
-    if total["clicks"] > 0 and total["reach"] > 0:
-        return "ctr", "CTR"
-    return "views_per_publication", "views / publication"
-
-
-def _confidence(publications: int) -> str:
-    if publications >= HIGH_CONFIDENCE_SAMPLE:
-        return "high"
-    if publications >= MIN_ACTION_SAMPLE:
-        return "medium"
+def _confidence(publications: int, minimum: int) -> str:
+    if publications >= max(minimum * HIGH_CONFIDENCE_MULTIPLIER, 30): return "high"
+    if publications >= minimum: return "medium"
     return "low"
 
 
-def _segment_rows(
-    dimension: str,
-    buckets: dict[str, dict[str, float]],
-    *,
-    metric: str,
-    baseline: float,
-) -> list[dict[str, Any]]:
+def _segment_rows(dimension: str, buckets: dict[str, dict[str, float]], *, metric: str, baseline: float,
+                  minimum: int, allocatable: bool) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for name, bucket in buckets.items():
         publications = int(bucket["publications"])
         value = _metric_value(bucket, metric)
         lift = ((value / baseline) - 1.0) if baseline > 0 else None
-        confidence = _confidence(publications)
-        if publications < MIN_ACTION_SAMPLE:
+        confidence = _confidence(publications, minimum)
+        if not allocatable:
+            action = "context_only"
+        elif publications < minimum:
             action = "explore"
         elif lift is not None and lift >= 0.15:
             action = "scale_cautiously"
@@ -97,32 +80,28 @@ def _segment_rows(
         else:
             action = "keep_testing"
         result.append({
-            "dimension": dimension,
-            "name": name,
-            "publications": publications,
-            "metric_value": round(value, 6),
-            "lift_vs_baseline": round(lift, 4) if lift is not None else None,
-            "confidence": confidence,
-            "action": action,
-            "totals": {
-                "views": int(bucket["views"]),
-                "impressions": int(bucket["impressions"]),
-                "clicks": int(bucket["clicks"]),
-                "leads": int(bucket["leads"]),
-                "conversions": int(bucket["conversions"]),
-                "revenue": round(bucket["revenue"], 2),
-            },
+            "dimension": dimension, "name": name, "publications": publications,
+            "metric_value": round(value, 6), "lift_vs_baseline": round(lift, 4) if lift is not None else None,
+            "confidence": confidence, "action": action,
+            "totals": {key: (round(bucket[key], 2) if key == "revenue" else int(bucket[key])) for key in ("views", "impressions", "clicks", "leads", "conversions", "revenue")},
         })
     return sorted(result, key=lambda row: (row["metric_value"], row["publications"]), reverse=True)
 
 
-def derive_learning_context(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """Create a compact, planner-safe learning snapshot from latest publication rows."""
+def derive_learning_context(
+    records: list[dict[str, Any]],
+    *,
+    primary_metric: str = "views_per_publication",
+    min_action_sample: int = 10,
+    exploration_share: float = DEFAULT_EXPLORATION_SHARE,
+) -> dict[str, Any]:
+    metric = primary_metric if primary_metric in SUPPORTED_PRIMARY_METRICS else "views_per_publication"
+    minimum = max(MIN_ACTION_SAMPLE, int(min_action_sample))
+    exploration = min(0.50, max(0.05, float(exploration_share)))
     total = _bucket()
     dimensions: dict[str, dict[str, dict[str, float]]] = {
-        "content_type": defaultdict(_bucket),
-        "rubric": defaultdict(_bucket),
-        "platform": defaultdict(_bucket),
+        "content_type": defaultdict(_bucket), "rubric": defaultdict(_bucket),
+        "platform": defaultdict(_bucket), "account": defaultdict(_bucket),
     }
     for record in records:
         metrics = record.get("metrics") or {}
@@ -130,81 +109,68 @@ def derive_learning_context(records: list[dict[str, Any]]) -> dict[str, Any]:
         _add(dimensions["content_type"][str(record.get("content_type") or "other")], metrics)
         _add(dimensions["rubric"][str(record.get("rubric") or "Unassigned")], metrics)
         _add(dimensions["platform"][str(record.get("platform") or "unknown")], metrics)
+        _add(dimensions["account"][str(record.get("account_id") or "unknown")], metrics)
 
-    metric, label = _primary_metric(total)
     baseline = _metric_value(total, metric)
     ranked = {
-        name: _segment_rows(name, buckets, metric=metric, baseline=baseline)
+        name: _segment_rows(name, buckets, metric=metric, baseline=baseline, minimum=minimum,
+                            allocatable=name in {"content_type", "rubric"})
         for name, buckets in dimensions.items()
     }
     publications = int(total["publications"])
-    actionable = publications >= MIN_ACTION_SAMPLE
-    winners = [
-        row for dimension in ranked.values() for row in dimension
-        if row["action"] == "scale_cautiously"
-    ][:5]
-    watch = [
-        row for dimension in ranked.values() for row in reversed(dimension)
-        if row["action"] == "reduce_and_retest"
-    ][:5]
+    actionable = publications >= minimum
+    allocation_rows = ranked["content_type"] + ranked["rubric"]
+    winners = [row for row in allocation_rows if row["action"] == "scale_cautiously"][:5]
+    watch = [row for row in reversed(allocation_rows) if row["action"] == "reduce_and_retest"][:5]
 
     guidance: list[str] = []
     if not actionable:
-        guidance.append(
-            f"Only {publications} publication(s) have usable downstream data; do not optimize allocation yet. Collect at least {MIN_ACTION_SAMPLE}."
-        )
+        guidance.append(f"Only {publications} publication(s) have usable downstream data; collect at least {minimum} before allocation changes.")
     else:
-        guidance.append(
-            f"Use historical {label} as a prior, not a rule. Keep at least {int(DEFAULT_EXPLORATION_SHARE * 100)}% of the batch for genuinely new angles/rubrics."
-        )
+        guidance.append(f"Optimize the configured metric {metric}; keep at least {int(exploration * 100)}% for genuinely new content hypotheses.")
+        guidance.append("Platform/account rows are context diagnostics only; never infer that a rubric won merely because it was distributed on a stronger account.")
         if winners:
-            names = ", ".join(f"{row['dimension']}={row['name']}" for row in winners[:3])
-            guidance.append(f"Cautiously allocate more tests to: {names}.")
+            guidance.append("Cautiously allocate more tests to: " + ", ".join(f"{row['dimension']}={row['name']}" for row in winners[:3]) + ".")
         if watch:
-            names = ", ".join(f"{row['dimension']}={row['name']}" for row in watch[:3])
-            guidance.append(f"Reduce repetition and retest with a different angle before abandoning: {names}.")
+            guidance.append("Reduce repetition and retest: " + ", ".join(f"{row['dimension']}={row['name']}" for row in watch[:3]) + ".")
 
     return {
         "status": "learning" if actionable else "insufficient_data",
         "publications": publications,
         "primary_metric": metric,
-        "primary_metric_label": label,
+        "primary_metric_label": metric.replace("_", " "),
         "baseline": round(baseline, 6),
-        "exploration_share": DEFAULT_EXPLORATION_SHARE,
-        "by_content_type": ranked["content_type"],
-        "by_rubric": ranked["rubric"],
-        "by_platform": ranked["platform"],
+        "exploration_share": exploration,
+        "min_action_sample": minimum,
+        "by_content_type": ranked["content_type"], "by_rubric": ranked["rubric"],
+        "by_platform": ranked["platform"], "by_account": ranked["account"],
         "recommendations": {"winners": winners, "watch": watch, "guidance": guidance},
     }
 
 
 async def build_performance_learning_context(session, project_id: uuid.UUID, *, limit: int = 20000) -> dict[str, Any]:
+    project = await session.get(Project, project_id)
+    if project is None:
+        return derive_learning_context([])
     items = (await session.execute(select(ContentItem).where(ContentItem.project_id == project_id))).scalars().all()
     if not items:
-        return derive_learning_context([])
+        return derive_learning_context([], primary_metric=project.learning_primary_metric,
+                                       min_action_sample=project.learning_min_publications,
+                                       exploration_share=project.learning_exploration_share)
     item_map = {item.id: item for item in items}
-
-    snapshots = (
-        await session.execute(
-            select(PerformanceSnapshot)
-            .where(PerformanceSnapshot.project_id == project_id)
-            .order_by(PerformanceSnapshot.captured_at.desc(), PerformanceSnapshot.created_at.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
+    snapshots = (await session.execute(
+        select(PerformanceSnapshot).where(PerformanceSnapshot.project_id == project_id)
+        .order_by(PerformanceSnapshot.captured_at.desc(), PerformanceSnapshot.created_at.desc()).limit(limit)
+    )).scalars().all()
     latest: dict[tuple[str, str], PerformanceSnapshot] = {}
     for snapshot in snapshots:
         latest.setdefault((snapshot.source, snapshot.external_publication_id), snapshot)
 
-    runs = (
-        await session.execute(select(GenerationRun).where(GenerationRun.content_item_id.in_(list(item_map.keys()))))
-    ).scalars().all()
+    runs = (await session.execute(select(GenerationRun).where(GenerationRun.content_item_id.in_(list(item_map.keys()))))).scalars().all()
     run_by_content = {run.content_item_id: run for run in runs if run.content_item_id}
     batch_items = []
     if runs:
-        batch_items = (
-            await session.execute(select(ProductionBatchItem).where(ProductionBatchItem.child_run_id.in_([run.id for run in runs])))
-        ).scalars().all()
+        batch_items = (await session.execute(select(ProductionBatchItem).where(ProductionBatchItem.child_run_id.in_([run.id for run in runs])))).scalars().all()
     batch_by_run = {row.child_run_id: row for row in batch_items if row.child_run_id}
     rubric_ids = {row.rubric_id for row in batch_items if row.rubric_id}
     rubric_names: dict[uuid.UUID, str] = {}
@@ -215,16 +181,19 @@ async def build_performance_learning_context(session, project_id: uuid.UUID, *, 
     records: list[dict[str, Any]] = []
     for snapshot in latest.values():
         item = item_map.get(snapshot.content_item_id)
-        if not item:
-            continue
+        if not item: continue
         run = run_by_content.get(item.id)
         batch_item = batch_by_run.get(run.id) if run else None
         rubric = rubric_names.get(batch_item.rubric_id, "Unassigned") if batch_item else "Unassigned"
         content_type = item.type.value if hasattr(item.type, "value") else str(item.type)
+        metadata = snapshot.metadata_json or {}
         records.append({
-            "content_type": content_type,
-            "rubric": rubric,
-            "platform": snapshot.platform,
-            "metrics": snapshot.metrics or {},
+            "content_type": content_type, "rubric": rubric, "platform": snapshot.platform,
+            "account_id": metadata.get("account_id"), "metrics": snapshot.metrics or {},
         })
-    return derive_learning_context(records)
+    return derive_learning_context(
+        records,
+        primary_metric=project.learning_primary_metric,
+        min_action_sample=project.learning_min_publications,
+        exploration_share=project.learning_exploration_share,
+    )

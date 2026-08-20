@@ -7,10 +7,12 @@ complex document parsing into an isolated ingestion worker.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
 import os
+import zipfile
 from pathlib import Path
 
 from docx import Document as DocxDocument
@@ -20,6 +22,8 @@ from pypdf import PdfReader
 MAX_UPLOAD_BYTES = int(os.getenv("KNOWLEDGE_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
 MAX_TEXT_CHARS = int(os.getenv("KNOWLEDGE_MAX_TEXT_CHARS", "2000000"))
 MAX_PDF_PAGES = int(os.getenv("KNOWLEDGE_MAX_PDF_PAGES", "300"))
+MAX_DOCX_UNCOMPRESSED_BYTES = int(os.getenv("KNOWLEDGE_MAX_DOCX_UNCOMPRESSED_BYTES", str(64 * 1024 * 1024)))
+MAX_DOCX_ENTRIES = int(os.getenv("KNOWLEDGE_MAX_DOCX_ENTRIES", "5000"))
 CHUNK_SIZE = int(os.getenv("KNOWLEDGE_CHUNK_CHARS", "1400"))
 CHUNK_OVERLAP = int(os.getenv("KNOWLEDGE_CHUNK_OVERLAP", "200"))
 
@@ -73,6 +77,57 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
+def _extract_text_sync(raw: bytes, suffix: str, filename: str) -> tuple[str, dict]:
+    metadata: dict = {"filename": filename, "size_bytes": len(raw)}
+    if suffix in {".txt", ".md", ".markdown"}:
+        text = raw.decode("utf-8-sig")
+    elif suffix == ".json":
+        parsed = json.loads(raw.decode("utf-8-sig"))
+        text = json.dumps(parsed, ensure_ascii=False, indent=2)
+    elif suffix == ".pdf":
+        reader = PdfReader(io.BytesIO(raw), strict=False)
+        if len(reader.pages) > MAX_PDF_PAGES:
+            raise HTTPException(413, f"PDF exceeds {MAX_PDF_PAGES} pages")
+        pages: list[str] = []
+        total = 0
+        for index, page in enumerate(reader.pages):
+            value = page.extract_text() or ""
+            if value.strip():
+                total += len(value)
+                if total > MAX_TEXT_CHARS:
+                    raise HTTPException(413, f"Extracted text exceeds {MAX_TEXT_CHARS} characters")
+                pages.append(f"[Page {index + 1}]\n{value}")
+        text = "\n\n".join(pages)
+        metadata["pages"] = len(reader.pages)
+    elif suffix == ".docx":
+        # DOCX is a ZIP container. Bound uncompressed size/entry count before python-docx expands it.
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            entries = archive.infolist()
+            if len(entries) > MAX_DOCX_ENTRIES:
+                raise HTTPException(413, f"DOCX exceeds {MAX_DOCX_ENTRIES} archive entries")
+            uncompressed = sum(info.file_size for info in entries)
+            if uncompressed > MAX_DOCX_UNCOMPRESSED_BYTES:
+                raise HTTPException(413, f"DOCX expands beyond {MAX_DOCX_UNCOMPRESSED_BYTES} bytes")
+            if any(info.flag_bits & 0x1 for info in entries):
+                raise HTTPException(422, "Encrypted DOCX files are not supported")
+            metadata["uncompressed_bytes"] = uncompressed
+        document = DocxDocument(io.BytesIO(raw))
+        parts: list[str] = []
+        total = 0
+        for paragraph in document.paragraphs:
+            value = paragraph.text.strip()
+            if not value:
+                continue
+            total += len(value)
+            if total > MAX_TEXT_CHARS:
+                raise HTTPException(413, f"Extracted text exceeds {MAX_TEXT_CHARS} characters")
+            parts.append(value)
+        text = "\n\n".join(parts)
+    else:
+        raise HTTPException(415, "Unsupported file type")
+    return text, metadata
+
+
 async def extract_upload(upload: UploadFile) -> tuple[str, str, dict]:
     raw = await upload.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES:
@@ -83,47 +138,18 @@ async def extract_upload(upload: UploadFile) -> tuple[str, str, dict]:
     if suffix not in SUPPORTED_SUFFIXES:
         raise HTTPException(415, f"Unsupported file type: {suffix or 'unknown'}")
 
-    metadata: dict = {"filename": filename, "size_bytes": len(raw)}
     try:
-        if suffix in {".txt", ".md", ".markdown"}:
-            text = raw.decode("utf-8-sig")
-        elif suffix == ".json":
-            parsed = json.loads(raw.decode("utf-8-sig"))
-            text = json.dumps(parsed, ensure_ascii=False, indent=2)
-        elif suffix == ".pdf":
-            reader = PdfReader(io.BytesIO(raw))
-            if len(reader.pages) > MAX_PDF_PAGES:
-                raise HTTPException(413, f"PDF exceeds {MAX_PDF_PAGES} pages")
-            pages = []
-            for index, page in enumerate(reader.pages):
-                value = page.extract_text() or ""
-                if value.strip():
-                    pages.append(f"[Page {index + 1}]\n{value}")
-                if sum(len(part) for part in pages) > MAX_TEXT_CHARS:
-                    raise HTTPException(413, f"Extracted text exceeds {MAX_TEXT_CHARS} characters")
-            text = "\n\n".join(pages)
-            metadata["pages"] = len(reader.pages)
-        elif suffix == ".docx":
-            document = DocxDocument(io.BytesIO(raw))
-            parts: list[str] = []
-            total = 0
-            for paragraph in document.paragraphs:
-                value = paragraph.text.strip()
-                if not value:
-                    continue
-                total += len(value)
-                if total > MAX_TEXT_CHARS:
-                    raise HTTPException(413, f"Extracted text exceeds {MAX_TEXT_CHARS} characters")
-                parts.append(value)
-            text = "\n\n".join(parts)
-        else:  # guarded by SUPPORTED_SUFFIXES
-            raise HTTPException(415, "Unsupported file type")
+        text, metadata = await asyncio.wait_for(
+            asyncio.to_thread(_extract_text_sync, raw, suffix, filename),
+            timeout=float(os.getenv("KNOWLEDGE_PARSE_TIMEOUT_SECONDS", "30")),
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(422, "Document parsing timed out") from exc
     except HTTPException:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError) as exc:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError, KeyError, zipfile.BadZipFile) as exc:
         raise HTTPException(422, f"Could not parse {filename}: {exc}") from exc
     except Exception as exc:
-        # Do not leak parser internals to the user.
         raise HTTPException(422, f"Could not extract readable text from {filename}") from exc
 
     return normalize_text(text), upload.content_type or "application/octet-stream", metadata

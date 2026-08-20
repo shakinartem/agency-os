@@ -25,30 +25,33 @@ _project_root = _packages_dir.parent      # .../agency-os/
 # ── Ensure the packages directory is on sys.path ───────────────────────────
 sys.path.insert(0, str(_packages_dir))
 
-# ── Read DATABASE_URL from .env manually (ONE variable only) ───────────────
-_dotenv_path = _project_root / ".env"
-print(f"[alembic/env.py] .env path: {_dotenv_path}", file=sys.stderr)
-print(f"[alembic/env.py] .env exists: {_dotenv_path.exists()}", file=sys.stderr)
-
-_raw_url = ""
-if _dotenv_path.exists():
-    with open(_dotenv_path, encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if line.startswith("DATABASE_URL="):
-                _raw_url = line.split("=", 1)[1].strip().strip("\"'")
-                break
-
+# ── Resolve DATABASE_URL without baking secrets into images ────────────────
+# Runtime environment wins. Local .env remains a developer convenience only.
+_raw_url = os.getenv("DATABASE_URL", "").strip()
+if not _raw_url:
+    _dotenv_path = _project_root / ".env"
+    if _dotenv_path.exists():
+        with open(_dotenv_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DATABASE_URL="):
+                    _raw_url = line.split("=", 1)[1].strip().strip("\"'")
+                    break
 if not _raw_url:
     _raw_url = "postgresql://agency:agency_secret@localhost:5432/agency_os"
-    print(f"[alembic/env.py] DATABASE_URL was empty, using hardcoded fallback", file=sys.stderr)
+    print("[alembic/env.py] DATABASE_URL not set; using development fallback", file=sys.stderr)
 
 # Sanitise: replace asyncpg with psycopg2 for synchronous Alembic
 _sync_url = _raw_url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
 _sync_url = _sync_url.replace("postgresql+aiosqlite://", "sqlite:///")
 _sync_url = _sync_url.encode("ascii", errors="ignore").decode("ascii")
 # In Docker, hostname MUST be "postgres" — do NOT rewrite to localhost
-print(f"[alembic/env.py] Sync URL: {_sync_url!r}", file=sys.stderr)
+from urllib.parse import urlparse
+_log_parsed = urlparse(_sync_url)
+print(
+    f"[alembic/env.py] database={_log_parsed.username or 'unknown'}@{_log_parsed.hostname or 'localhost'}:{_log_parsed.port or 5432}/{_log_parsed.path.lstrip('/')}",
+    file=sys.stderr,
+)
 
 # ── Set os.environ so DatabaseConfig (pydantic-settings) picks it up ────────
 os.environ["DATABASE_URL"] = _sync_url
@@ -81,7 +84,6 @@ def run_migrations_offline() -> None:
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode against a live DB."""
     # Build URL via structured object to bypass Windows env encoding issues
-    from urllib.parse import urlparse
     parsed = urlparse(_sync_url)
     conn_url = URL.create(
         drivername="postgresql+psycopg2",
@@ -91,7 +93,7 @@ def run_migrations_online() -> None:
         port=parsed.port or 5432,
         database=parsed.path.lstrip("/") if parsed.path else "agency_os",
     )
-    print(f"[alembic/env.py] conn_url: {conn_url!r}", file=sys.stderr)
+    print(f"[alembic/env.py] opening PostgreSQL migration connection to {parsed.hostname or 'localhost'}:{parsed.port or 5432}", file=sys.stderr)
     connectable = create_engine(
         conn_url,
         poolclass=pool.NullPool,

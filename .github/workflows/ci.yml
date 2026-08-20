@@ -40,7 +40,7 @@ jobs:
       - name: Compile Python sources
         env:
           PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/packages:${{ github.workspace }}/apps/api
-        run: python -m compileall -q apps/api apps/worker packages/database
+        run: python -m compileall -q apps/api apps/worker packages/database scripts
       - name: Apply database migrations on PostgreSQL
         working-directory: packages/database
         env:
@@ -98,7 +98,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate Compose configuration
+      - name: Validate development and production deployment contracts
         run: |
           cp .env.example .env
           docker compose config --quiet
+          cat > .env.prod.ci <<'EOF'
+          APP_ENV=production
+          APP_DEBUG=false
+          FACTORY_DOMAIN=factory.example.com
+          FACTORY_ASSETS_DOMAIN=assets.factory.example.com
+          DATABASE_URL=postgresql+asyncpg://agency:ci-postgres-password-123456789@postgres:5432/agency_os
+          POSTGRES_PASSWORD=ci-postgres-password-123456789
+          MINIO_ROOT_USER=ci-content-factory
+          MINIO_ROOT_PASSWORD=ci-minio-password-123456789012
+          MINIO_APP_USER=ci-content-app
+          MINIO_APP_PASSWORD=ci-minio-app-password-123456789012
+          SECRET_KEY=ci-secret-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SESSION_COOKIE_SECURE=true
+          CORS_ORIGINS=["https://factory.example.com"]
+          ALLOWED_HOSTS=["factory.example.com","content-factory-api","api","localhost"]
+          AUTOPOSTER_TOKEN=ci-autoposter-token-cccccccccccccccccccccccc
+          LLM_API_KEY=ci-not-a-real-provider-key
+          PERFORMANCE_INGEST_TOKEN=ci-performance-token-dddddddddddddddddddddddd
+          LLM_MODEL_PRICING_JSON={"gpt-ci":{"input_per_1m":1,"output_per_1m":1}}
+          EOF
+          python scripts/server-preflight.py --env .env.prod.ci
+          docker compose --env-file .env.prod.ci -f deploy/docker-compose.prod.yml config --quiet
+          docker run --rm \
+            -e FACTORY_DOMAIN=factory.example.com \
+            -e FACTORY_ASSETS_DOMAIN=assets.factory.example.com \
+            -v "$PWD/deploy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile

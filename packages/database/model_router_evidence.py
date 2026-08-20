@@ -25,7 +25,7 @@ from .model_router import (
     stage_family,
 )
 from .model_router_prompt import current_content_prompt_version
-from .models import GenerationRun, GenerationStep, PerformanceSnapshot
+from .models import GenerationRun, GenerationStep, PerformanceSnapshot, Project
 
 
 def _number(value: Any) -> float | None:
@@ -42,7 +42,7 @@ def _root_provider_meta(output: dict[str, Any]) -> dict[str, Any] | None:
 def records_from_step(
     step: GenerationStep,
     run: GenerationRun,
-    performance_by_content: dict[uuid.UUID, float],
+    performance_by_run: dict[uuid.UUID, float],
 ) -> list[dict[str, Any]]:
     """Turn one persisted step into live and optional shadow evidence rows."""
     output = step.output_json or {}
@@ -61,7 +61,7 @@ def records_from_step(
         rows.append({
             "model": live_model,
             "quality": live_quality,
-            "performance": performance_by_content.get(run.content_item_id) if run.content_item_id else None,
+            "performance": performance_by_run.get(run.id),
             "latency_ms": (root_meta or {}).get("latency_ms"),
             "cost_usd": (root_meta or {}).get("estimated_cost_usd"),
             "evidence_source": "live",
@@ -145,26 +145,36 @@ async def build_model_router_report(session, project_id: uuid.UUID, *, default_m
 
     runs = (await session.execute(select(GenerationRun).where(GenerationRun.project_id == project_id))).scalars().all()
     run_map = {run.id: run for run in runs}
+    project = await session.get(Project, project_id)
+    configured_metric = getattr(project, "learning_primary_metric", None) if project else None
 
     performance_metric = None
-    performance_by_content: dict[uuid.UUID, float] = {}
-    content_ids = {run.content_item_id for run in runs if run.content_item_id}
-    if content_ids:
+    performance_by_run: dict[uuid.UUID, float] = {}
+    run_ids = set(run_map)
+    if run_ids:
+        # Only exact 1.1 publication lineage may influence model routing. Legacy content-level
+        # analytics remain visible in reporting but are not causal enough to promote a model.
         raw = (await session.execute(
             select(PerformanceSnapshot)
-            .where(PerformanceSnapshot.project_id == project_id, PerformanceSnapshot.content_item_id.in_(list(content_ids)))
+            .where(
+                PerformanceSnapshot.project_id == project_id,
+                PerformanceSnapshot.generation_run_id.in_(list(run_ids)),
+                PerformanceSnapshot.payload_sha256.is_not(None),
+            )
             .order_by(PerformanceSnapshot.captured_at.desc(), PerformanceSnapshot.created_at.desc())
             .limit(20000)
         )).scalars().all()
         latest: dict[tuple[str, str], PerformanceSnapshot] = {}
         for snapshot in raw:
             latest.setdefault((snapshot.source, snapshot.external_publication_id), snapshot)
-        performance_metric, performance_by_content = _performance_scores([
-            {"content_item_id": row.content_item_id, "metrics": row.metrics or {}}
-            for row in latest.values()
-        ])
-        if not latest:
-            performance_metric = None
+        if latest:
+            # Reuse metric normalization by treating a generation run as the attribution unit.
+            performance_metric, raw_scores = _performance_scores([
+                {"content_item_id": row.generation_run_id, "metrics": row.metrics or {}}
+                for row in latest.values()
+                if row.generation_run_id is not None
+            ], metric_override=configured_metric)
+            performance_by_run = raw_scores
 
     records_by_stage: dict[str, list[dict[str, Any]]] = defaultdict(list)
     if run_map:
@@ -183,7 +193,7 @@ async def build_model_router_report(session, project_id: uuid.UUID, *, default_m
             run = run_map.get(step.run_id)
             if family is None or run is None:
                 continue
-            records_by_stage[family].extend(records_from_step(step, run, performance_by_content))
+            records_by_stage[family].extend(records_from_step(step, run, performance_by_run))
 
     stages = {
         family: _score_with_evidence_gates(

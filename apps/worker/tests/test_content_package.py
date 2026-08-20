@@ -84,3 +84,25 @@ def test_variant_requires_plain_text():
     del payload["variants"][0]["plain_text"]
     with pytest.raises(ValidationError):
         validate_content_package(payload)
+
+
+def test_v11_requires_exact_lineage():
+    payload = valid_payload()
+    payload["schema_version"] = "content-package/1.1"
+    with pytest.raises(ValidationError):
+        validate_content_package(payload)
+
+    payload["lineage"] = {
+        "content_version": 3,
+        "export_delivery_id": "11111111-1111-1111-1111-111111111111",
+        "generation_run_id": "22222222-2222-2222-2222-222222222222",
+        "prompt_version": "factory-v4",
+        "prompt_hash": "a" * 64,
+        "model": "gpt-test",
+        "model_router": {"reason": "shadow_only"},
+        "shadow_experiment_ids": [],
+    }
+    normalized = validate_content_package(payload)
+    assert normalized["schema_version"] == "content-package/1.1"
+    assert normalized["lineage"]["content_version"] == 3
+    assert normalized["lineage"]["prompt_hash"] == "a" * 64

@@ -23,6 +23,8 @@ from database.models import (
 )
 from database.prompt_experiments import MAX_SHADOW_SAMPLE_RATE, build_prompt_experiment_report
 
+from ..access import ensure_project_capability
+from ..audit import record_audit
 from ..database import get_db
 from ..dependencies import get_current_user
 
@@ -78,8 +80,9 @@ def _experiment_json(row: PromptExperiment) -> dict:
 async def model_routing_report(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
+    await ensure_project_capability(db, user, project_id, "router:view")
     report = await get_cached_model_router_report(
         db,
         project_id,
@@ -93,8 +96,9 @@ async def model_routing_report(
 async def prompt_experiments_report(
     project_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
+    await ensure_project_capability(db, user, project_id, "experiments:view")
     return await build_prompt_experiment_report(db, project_id)
 
 
@@ -104,6 +108,7 @@ async def create_prompt_experiment(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await ensure_project_capability(db, user, body.project_id, "experiments:manage")
     if body.stage_family not in ROUTED_STAGE_FAMILIES:
         raise HTTPException(400, f"Unsupported stage_family: {body.stage_family}")
     if not 1 <= len(body.arms) <= 4:
@@ -160,6 +165,7 @@ async def create_prompt_experiment(
             active=True,
             metadata_json={},
         ))
+    await record_audit(db, actor=user, action="experiment.create", project_id=body.project_id, entity_type="experiment", entity_id=experiment.id, metadata={"stage_family": body.stage_family, "sample_rate": body.sample_rate})
     await db.commit()
     await db.refresh(experiment)
     return _experiment_json(experiment)
@@ -176,9 +182,10 @@ async def _get_experiment(db: AsyncSession, experiment_id: uuid.UUID) -> PromptE
 async def start_prompt_experiment(
     experiment_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     experiment = await _get_experiment(db, experiment_id)
+    await ensure_project_capability(db, user, experiment.project_id, "experiments:manage")
     if experiment.status not in {"draft", "paused"}:
         raise HTTPException(409, f"Cannot start experiment from status {experiment.status}")
     if experiment.control_prompt_version != current_content_prompt_version():
@@ -201,6 +208,7 @@ async def start_prompt_experiment(
     experiment.status = "shadow"
     experiment.started_at = experiment.started_at or datetime.now(timezone.utc)
     experiment.completed_at = None
+    await record_audit(db, actor=user, action="experiment.start", project_id=experiment.project_id, entity_type="experiment", entity_id=experiment.id)
     try:
         await db.commit()
     except IntegrityError as exc:
@@ -213,12 +221,14 @@ async def start_prompt_experiment(
 async def pause_prompt_experiment(
     experiment_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     experiment = await _get_experiment(db, experiment_id)
+    await ensure_project_capability(db, user, experiment.project_id, "experiments:manage")
     if experiment.status != "shadow":
         raise HTTPException(409, "Only a shadow experiment can be paused")
     experiment.status = "paused"
+    await record_audit(db, actor=user, action="experiment.pause", project_id=experiment.project_id, entity_type="experiment", entity_id=experiment.id)
     await db.commit()
     return _experiment_json(experiment)
 
@@ -227,12 +237,14 @@ async def pause_prompt_experiment(
 async def complete_prompt_experiment(
     experiment_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
 ):
     experiment = await _get_experiment(db, experiment_id)
+    await ensure_project_capability(db, user, experiment.project_id, "experiments:manage")
     if experiment.status not in {"shadow", "paused"}:
         raise HTTPException(409, "Only shadow/paused experiments can be completed")
     experiment.status = "completed"
     experiment.completed_at = datetime.now(timezone.utc)
+    await record_audit(db, actor=user, action="experiment.complete", project_id=experiment.project_id, entity_type="experiment", entity_id=experiment.id)
     await db.commit()
     return _experiment_json(experiment)

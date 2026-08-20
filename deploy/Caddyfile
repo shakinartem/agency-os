@@ -1,0 +1,33 @@
+{$FACTORY_DOMAIN} {
+    encode zstd gzip
+    request_body {
+        max_size 12MB
+    }
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    }
+    reverse_proxy web:3000
+}
+
+{$FACTORY_ASSETS_DOMAIN} {
+    encode zstd gzip
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+    @asset_get {
+        method GET HEAD
+        path /content-assets/*
+    }
+    handle @asset_get {
+        reverse_proxy minio:9000
+    }
+    respond 404
+}

@@ -1,6 +1,8 @@
 """Pydantic contracts for Content Factory API."""
 
-from datetime import datetime
+from datetime import datetime, timezone
+import json
+import math
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -141,16 +143,44 @@ class PerformanceIngest(BaseModel):
     @field_validator("metrics")
     @classmethod
     def validate_metrics(cls, value: dict[str, float | int]) -> dict[str, float | int]:
+        if len(value) > 100:
+            raise ValueError("metrics contains too many keys")
         cleaned: dict[str, float | int] = {}
         for key, raw in value.items():
             name = key.strip().lower()
             if not name:
                 continue
+            if len(name) > 100:
+                raise ValueError("metric name is too long")
             number = float(raw)
+            if not math.isfinite(number):
+                raise ValueError(f"metric {name} must be finite")
             if number < 0:
                 raise ValueError(f"metric {name} cannot be negative")
+            if number > 1e15:
+                raise ValueError(f"metric {name} exceeds the accepted range")
             cleaned[name] = int(number) if number.is_integer() else number
+        if not cleaned:
+            raise ValueError("At least one numeric metric is required")
         return cleaned
+
+    @field_validator("metadata")
+    @classmethod
+    def validate_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        if len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8")) > 128 * 1024:
+            raise ValueError("metadata exceeds 128 KiB")
+        return value
+
+    @field_validator("captured_at")
+    @classmethod
+    def validate_captured_at(cls, value: datetime) -> datetime:
+        normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        if normalized > datetime.now(timezone.utc).replace(microsecond=999999):
+            # Allow provider clock skew, but not arbitrarily future-dated learning events.
+            from datetime import timedelta
+            if normalized > datetime.now(timezone.utc) + timedelta(minutes=10):
+                raise ValueError("captured_at is too far in the future")
+        return normalized
 
 
 class ExportRead(BaseModel):

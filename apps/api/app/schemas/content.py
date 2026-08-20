@@ -1,7 +1,7 @@
 """Content schemas used by the Content Factory review workspace."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 class ContentItemCreate(BaseModel):
     project_id: str
     type: str = "post"
-    status: str = "draft"
+    status: Literal["draft", "review"] = "draft"
     title: str
     body: str | None = None
     task: str | None = None
@@ -20,7 +20,7 @@ class ContentItemCreate(BaseModel):
 
 class ContentItemUpdate(BaseModel):
     type: str | None = None
-    status: str | None = None
+    status: Literal["draft", "review"] | None = None
     title: str | None = None
     body: str | None = None
     hook: str | None = None

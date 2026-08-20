@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import String, Text
+from sqlalchemy import Float, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -20,6 +20,10 @@ class Project(Base, TimestampMixin):
     slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Stable business objective for downstream learning. Do not auto-switch metric when a new event appears.
+    learning_primary_metric: Mapped[str] = mapped_column(String(80), default="views_per_publication", nullable=False)
+    learning_exploration_share: Mapped[float] = mapped_column(Float, default=0.25, nullable=False)
+    learning_min_publications: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
 
     # relationships
     leads = relationship("Lead", back_populates="project")
